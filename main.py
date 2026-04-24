@@ -7,6 +7,13 @@ import random
 import traceback
 import sys
 import requests
+import io
+try:
+    import qrcode
+    QRCODE_AVAILABLE = True
+except ImportError:
+    QRCODE_AVAILABLE = False
+    print("[WARNING] Библиотека qrcode не установлена. QR-код не будет генерироваться.")
 from kivy.app import App
 from kivy.uix.widget import Widget
 from kivy.uix.boxlayout import BoxLayout
@@ -142,6 +149,10 @@ class SimpleMaxApp(App):
         self.input_field = None
         self.chat_selector = None
         self.chat_list = {}  # id -> name
+        self.chat_last_time = {}  # id -> timestamp последнего сообщения (из lastMessage)
+        self.chat_is_group = {}  # id -> bool (групповой чат?)
+        self.chat_participants = {}  # id -> list of user_ids (участники чата)
+        self.user_names = {}  # user_id -> name (для подписи в групповых чатах)
         self.app_paused = False
         self.reconnect_attempt = 0
         self.seq_counter = 0
@@ -153,6 +164,7 @@ class SimpleMaxApp(App):
         self.chat_history_cache = {}  # кэш истории чатов в памяти: chat_id -> список сообщений
         self.history_request_timestamps = {}  # время последнего запроса истории для каждого чата
         self.history_request_cooldown = 2  # минимальная задержка между запросами истории (секунды) - уменьшено для быстрого переключения на HTTP
+        self.token_invalid = False  # флаг невалидности токена
 
     def next_seq(self):
         """Возвращает следующий порядковый номер для WebSocket-сообщений"""
@@ -216,14 +228,12 @@ class SimpleMaxApp(App):
 
         # Список чатов (упрощённый - просто кнопка выбора)
         chat_panel = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(5), padding=dp(5))
-        chat_label = Label(text="Чаты:", size_hint_x=0.2)
-        self.chat_selector = Button(text="Выберите чат", size_hint_x=0.6)
-        self.chat_selector.bind(on_press=self.show_chat_list)
-        refresh_button = Button(text="Ист.", size_hint_x=0.2)
-        refresh_button.bind(on_press=self.request_history)
-        chat_panel.add_widget(chat_label)
+        self.chat_selector = Button(text="Группы", size_hint_x=0.5)
+        self.chat_selector.bind(on_press=self.show_groups_list)
+        contacts_button = Button(text="Контакты", size_hint_x=0.5)
+        contacts_button.bind(on_press=self.show_contacts_list)
         chat_panel.add_widget(self.chat_selector)
-        chat_panel.add_widget(refresh_button)
+        chat_panel.add_widget(contacts_button)
 
         root.add_widget(top_panel)
         root.add_widget(chat_panel)
@@ -247,6 +257,16 @@ class SimpleMaxApp(App):
                 cache = json.load(f)
             self.cache = cache
             self.chat_list = cache.get('names', {})
+            
+            # Загружаем флаги групповых чатов
+            group_flags = cache.get('group_flags', {})
+            for cid_str, is_group in group_flags.items():
+                self.chat_is_group[cid_str] = bool(is_group)
+            
+            # Загружаем имена пользователей
+            user_names = cache.get('user_names', {})
+            self.user_names.update(user_names)
+            print(f"[CACHE] Загружено {len(user_names)} имён пользователей")
             
             # Загружаем историю из файла в кэш памяти (для обратной совместимости)
             file_history = cache.get('history', {})
@@ -299,15 +319,16 @@ class SimpleMaxApp(App):
         list_layout = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
         list_layout.bind(minimum_height=list_layout.setter('height'))
         
-        # Получить историю для определения времени последнего сообщения
-        history = self.cache.get('history', {})
         # Создать список чатов с временем последнего сообщения
         chat_items = []
         for cid, name in self.chat_list.items():
-            last_time = 0
-            if cid in history and history[cid]:
-                last_msg = history[cid][-1]
-                last_time = last_msg.get('time', 0)
+            last_time = self.chat_last_time.get(cid, 0)
+            # Если нет времени в chat_last_time, попробовать получить из файлового кэша (для обратной совместимости)
+            if last_time == 0:
+                history = self.cache.get('history', {})
+                if cid in history and history[cid]:
+                    last_msg = history[cid][-1]
+                    last_time = last_msg.get('time', 0)
             chat_items.append((cid, name, last_time))
         # Сортировка по времени убывания (самые свежие сверху)
         chat_items.sort(key=lambda x: x[2], reverse=True)
@@ -328,6 +349,58 @@ class SimpleMaxApp(App):
         
         close_btn = Button(text="Закрыть", size_hint_y=None, height=dp(40))
         popup = Popup(title="Выберите чат", content=content, size_hint=(0.8, 0.8))
+        close_btn.bind(on_press=popup.dismiss)
+        content.add_widget(close_btn)
+        popup.open()
+
+    def show_groups_list(self, instance):
+        """Показать всплывающее окно со списком групп (только групповые чаты)"""
+        self.load_chats_from_cache()
+        if not self.chat_list:
+            self.chat_selector.text = "Нет групп"
+            return
+        
+        content = BoxLayout(orientation='vertical', spacing=dp(5), padding=dp(10))
+        scroll = ScrollView()
+        list_layout = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        list_layout.bind(minimum_height=list_layout.setter('height'))
+        
+        # Создать список групп с временем последнего сообщения
+        group_items = []
+        for cid, name in self.chat_list.items():
+            if not self.is_group_chat(cid):
+                continue
+            last_time = self.chat_last_time.get(cid, 0)
+            # Если нет времени в chat_last_time, попробовать получить из файлового кэша (для обратной совместимости)
+            if last_time == 0:
+                history = self.cache.get('history', {})
+                if cid in history and history[cid]:
+                    last_msg = history[cid][-1]
+                    last_time = last_msg.get('time', 0)
+            group_items.append((cid, name, last_time))
+        # Сортировка по времени убывания (самые свежие сверху)
+        group_items.sort(key=lambda x: x[2], reverse=True)
+        
+        if not group_items:
+            no_groups_label = Label(text="Нет групповых чатов", size_hint_y=None, height=dp(40))
+            list_layout.add_widget(no_groups_label)
+        
+        for cid, name, _ in group_items:
+            row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(2))
+            chat_btn = Button(text=name, size_hint_x=0.8,
+                              background_color=(0.2, 0.2, 0.3, 1))
+            chat_btn.bind(on_release=lambda btn, cid=cid: (self.switch_chat(cid), popup.dismiss()))
+            edit_btn = Button(text="✏️", size_hint_x=0.2, font_size=sp(20))
+            edit_btn.bind(on_release=lambda btn, cid=cid: self.rename_chat_dialog(cid, popup))
+            row.add_widget(chat_btn)
+            row.add_widget(edit_btn)
+            list_layout.add_widget(row)
+        
+        scroll.add_widget(list_layout)
+        content.add_widget(scroll)
+        
+        close_btn = Button(text="Закрыть", size_hint_y=None, height=dp(40))
+        popup = Popup(title="Группы", content=content, size_hint=(0.8, 0.8))
         close_btn.bind(on_press=popup.dismiss)
         content.add_widget(close_btn)
         popup.open()
@@ -385,6 +458,21 @@ class SimpleMaxApp(App):
         name = self.chat_list.get(chat_id_str, f"Чат {chat_id}")
         self.chat_selector.text = name
         print(f"[UI] Выбран чат: {chat_id} ({name})")
+        # Если чат групповой, убедиться, что все участники добавлены в контакты
+        if self.is_group_chat(chat_id_str):
+            print(f"[UI] Чат {chat_id_str} является групповым, проверяем участников")
+            if chat_id_str in self.chat_participants:
+                participant_ids = self.chat_participants[chat_id_str]
+                added = 0
+                for user_id in participant_ids:
+                    if user_id and user_id not in self.user_names:
+                        self.user_names[user_id] = user_id  # сохраняем ID как имя
+                        added += 1
+                if added > 0:
+                    print(f"[UI] Добавлено {added} участников в контакты")
+                    self.save_user_names_to_cache()
+            else:
+                print(f"[UI] Участники чата {chat_id_str} неизвестны")
         # Очистить текущие сообщения
         self.messages_box.clear_widgets()
         
@@ -407,6 +495,193 @@ class SimpleMaxApp(App):
         
         # Прокрутить вниз
         Clock.schedule_once(lambda dt: setattr(self.messages_box.parent, 'scroll_y', 0), 0.1)
+
+    def show_contacts_list(self, instance):
+        """Показать всплывающее окно со списком контактов (пользователей)"""
+        if not self.user_names:
+            # Попробовать загрузить из кэша
+            self.load_chats_from_cache()
+        if not self.user_names:
+            # Создать заглушку
+            content = BoxLayout(orientation='vertical', spacing=dp(5), padding=dp(10))
+            content.add_widget(Label(text="Нет контактов", halign='center'))
+            # Кнопка добавления контакта
+            add_btn = Button(text="Добавить контакт", size_hint_y=None, height=dp(40))
+            close_btn = Button(text="Закрыть", size_hint_y=None, height=dp(40))
+            popup = Popup(title="Контакты", content=content, size_hint=(0.8, 0.6))
+            add_btn.bind(on_press=lambda btn: self.add_contact_dialog(popup))
+            close_btn.bind(on_press=popup.dismiss)
+            content.add_widget(add_btn)
+            content.add_widget(close_btn)
+            popup.open()
+            return
+        
+        content = BoxLayout(orientation='vertical', spacing=dp(5), padding=dp(10))
+        # Создаём popup сразу, чтобы он был доступен в лямбдах
+        popup = Popup(title="Контакты", content=content, size_hint=(0.8, 0.8))
+        
+        # Кнопка добавления контакта перед списком
+        add_btn = Button(text="Добавить контакт", size_hint_y=None, height=dp(40))
+        add_btn.bind(on_press=lambda btn: self.add_contact_dialog(popup))
+        content.add_widget(add_btn)
+        
+        scroll = ScrollView()
+        list_layout = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        list_layout.bind(minimum_height=list_layout.setter('height'))
+        
+        # Создать список контактов из user_names и личных чатов
+        contact_items = []
+        # 1. Пользователи из user_names
+        for user_id, name in self.user_names.items():
+            # Пропускаем пустые имена
+            if not name or name == 'Пользователь':
+                continue
+            contact_items.append((user_id, name))
+        # 2. Личные чаты (не групповые) из chat_list
+        for cid, name in self.chat_list.items():
+            if self.is_group_chat(cid):
+                continue
+            # Проверяем, что ID состоит из цифр (девятизначные)
+            cid_str = str(cid)
+            if not cid_str.isdigit():
+                continue
+            # Если уже есть в contact_items (по ID), не добавляем дубликат
+            if any(uid == cid_str for uid, _ in contact_items):
+                continue
+            contact_items.append((cid_str, name))
+        
+        # Сортировка по имени
+        contact_items.sort(key=lambda x: x[1].lower())
+        
+        for user_id, name in contact_items:
+            row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(2))
+            contact_btn = Button(text=f"{name} ({user_id})", size_hint_x=0.8,
+                                  background_color=(0.2, 0.3, 0.2, 1))
+            # При нажатии на контакт можно открыть чат с ним (если есть) или создать новый
+            # Пока просто закрываем popup
+            contact_btn.bind(on_release=lambda btn, uid=user_id: (self.switch_to_chat_with_user(uid), popup.dismiss()))
+            edit_btn = Button(text="✏️", size_hint_x=0.2, font_size=sp(20))
+            edit_btn.bind(on_release=lambda btn, uid=user_id: self.rename_contact_dialog(uid, popup))
+            row.add_widget(contact_btn)
+            row.add_widget(edit_btn)
+            list_layout.add_widget(row)
+        
+        scroll.add_widget(list_layout)
+        content.add_widget(scroll)
+        
+        close_btn = Button(text="Закрыть", size_hint_y=None, height=dp(40))
+        close_btn.bind(on_press=popup.dismiss)
+        content.add_widget(close_btn)
+        popup.open()
+
+    def switch_to_chat_with_user(self, user_id):
+        """Переключиться на чат с пользователем (поиск или создание)"""
+        print(f"[UI] Запрошен чат с пользователем {user_id}")
+        user_id_str = str(user_id)
+        # Проверить, есть ли чат с таким ID в chat_list (личный чат)
+        if user_id_str in self.chat_list:
+            # Чат существует, переключаемся
+            self.switch_chat(user_id_str)
+            return
+        # Чат не найден, создаём запись в chat_list (личный чат)
+        name = self.user_names.get(user_id_str, f"Пользователь {user_id_str}")
+        self.chat_list[user_id_str] = name
+        # Сохранить в кэш (только имя)
+        self.save_to_cache(user_id_str, "", "left", name=name)
+        # Пометить как не групповой чат
+        self.chat_is_group[user_id_str] = False
+        self.save_chat_group_flag(user_id_str, False)
+        # Переключиться на чат
+        self.switch_chat(user_id_str)
+
+    def rename_contact_dialog(self, user_id, parent_popup):
+        """Открыть диалог переименования контакта"""
+        parent_popup.dismiss()  # закрыть список контактов
+        current_name = self.user_names.get(str(user_id), f"Пользователь {user_id}")
+        content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(20))
+        input_field = TextInput(text=current_name,
+                                multiline=False, size_hint_y=None, height=dp(40))
+        content.add_widget(input_field)
+        
+        btn_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(5))
+        save_btn = Button(text="Сохранить")
+        cancel_btn = Button(text="Отмена")
+        btn_layout.add_widget(save_btn)
+        btn_layout.add_widget(cancel_btn)
+        content.add_widget(btn_layout)
+        
+        popup = Popup(title=f"Переименовать контакт {user_id}", content=content,
+                      size_hint=(0.8, 0.4))
+        
+        def save_name(instance):
+            new_name = input_field.text.strip()
+            if new_name:
+                self.user_names[str(user_id)] = new_name
+                # Сохранить в кэш
+                self.save_user_names_to_cache()
+                print(f"[UI] Контакт {user_id} переименован в '{new_name}'")
+                popup.dismiss()
+                # Обновить список контактов
+                self.show_contacts_list(None)
+            else:
+                input_field.hint_text = "Введите имя"
+        
+        def cancel(instance):
+            popup.dismiss()
+            self.show_contacts_list(None)
+        
+        save_btn.bind(on_press=save_name)
+        cancel_btn.bind(on_press=cancel)
+        popup.open()
+
+    def add_contact_dialog(self, parent_popup):
+        """Открыть диалог добавления нового контакта"""
+        parent_popup.dismiss()  # закрыть список контактов
+        content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(20))
+        # Поле для ID
+        id_input = TextInput(hint_text="ID пользователя (число)", multiline=False, size_hint_y=None, height=dp(40))
+        content.add_widget(id_input)
+        # Поле для имени
+        name_input = TextInput(hint_text="Имя (необязательно)", multiline=False, size_hint_y=None, height=dp(40))
+        content.add_widget(name_input)
+        
+        btn_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(5))
+        save_btn = Button(text="Добавить")
+        cancel_btn = Button(text="Отмена")
+        btn_layout.add_widget(save_btn)
+        btn_layout.add_widget(cancel_btn)
+        content.add_widget(btn_layout)
+        
+        popup = Popup(title="Добавить контакт", content=content, size_hint=(0.8, 0.5))
+        
+        def save_contact(instance):
+            user_id = id_input.text.strip()
+            name = name_input.text.strip()
+            if not user_id:
+                id_input.hint_text = "Введите ID"
+                return
+            # Если имя не указано, используем ID как имя
+            if not name:
+                name = user_id
+            # Проверяем, не существует ли уже контакт с таким ID
+            if user_id in self.user_names:
+                # Можно предложить переименовать, но просто обновим имя
+                pass
+            self.user_names[user_id] = name
+            # Сохранить в кэш
+            self.save_user_names_to_cache()
+            print(f"[UI] Добавлен контакт: {user_id} -> {name}")
+            popup.dismiss()
+            # Обновить список контактов
+            self.show_contacts_list(None)
+        
+        def cancel(instance):
+            popup.dismiss()
+            self.show_contacts_list(None)
+        
+        save_btn.bind(on_press=save_contact)
+        cancel_btn.bind(on_press=cancel)
+        popup.open()
 
     def request_chat_history_from_server(self, chat_id):
         """Запросить историю чата с сервера (использует WebSocket opcode 49)"""
@@ -431,6 +706,15 @@ class SimpleMaxApp(App):
             print(f"[UI] Создан запрос истории через WebSocket: {HISTORY_REQUEST_FILE}, chatId={chat_id_str}")
         except Exception as e:
             print(f"[UI] Ошибка создания файла запроса истории: {e}")
+        
+    def request_chat_list_update(self, instance=None):
+        """Запросить обновление списка чатов (opcode 19) через WebSocket"""
+        try:
+            with open(HISTORY_REQUEST_FILE, 'w', encoding='utf-8') as f:
+                json.dump({"type": "opcode19"}, f)
+            print(f"[UI] Создан запрос обновления списка чатов: {HISTORY_REQUEST_FILE}")
+        except Exception as e:
+            print(f"[UI] Ошибка создания файла запроса списка чатов: {e}")
         
     def request_chat_history_via_http(self, chat_id):
         """Запросить историю чата через HTTP API (запасной вариант) с пагинацией"""
@@ -571,46 +855,14 @@ class SimpleMaxApp(App):
         
         print(f"[UI] Всего получено {len(all_messages)} сообщений для чата {chat_id}")
         
-        # Преобразуем в формат приложения
-        formatted_messages = []
-        for msg in all_messages:
-            # Определяем сторону сообщения
-            sender_id = msg.get("senderId")
-            side = 'right' if str(sender_id) == str(MY_ID) else 'left'
-            text = msg.get("text", "")
-            timestamp = msg.get("timestamp")
-            message_id = msg.get("id")
-            reactions = msg.get("reactions")
-            
-            formatted_messages.append({
-                'text': text,
-                'side': side,
-                'time': timestamp,
-                'id': message_id,
-                'reactions': reactions
-            })
+        # Используем универсальный метод обработки сообщений
+        self.process_messages_list(all_messages, chat_id_str)
         
-        # Сохраняем в кэш памяти
-        if chat_id_str not in self.chat_history_cache:
-            self.chat_history_cache[chat_id_str] = []
-        # Добавляем новые сообщения, избегая дубликатов
-        existing_ids = {m.get('id') for m in self.chat_history_cache[chat_id_str]}
-        for msg in formatted_messages:
-            if msg.get('id') not in existing_ids:
-                self.chat_history_cache[chat_id_str].append(msg)
-        
-        # Ограничиваем размер кэша
-        if len(self.chat_history_cache[chat_id_str]) > MAX_MESSAGES_PER_CHAT:
-            self.chat_history_cache[chat_id_str] = self.chat_history_cache[chat_id_str][-MAX_MESSAGES_PER_CHAT:]
-        
-        # Сортируем по времени (старые -> новые)
-        self.chat_history_cache[chat_id_str].sort(key=lambda x: x.get('time', 0))
-        
-        # Обновляем UI, если это текущий чат
+        # Дополнительно, если это текущий чат, можно вызвать reload_chat_history для гарантии порядка
         if chat_id_str == self.current_chat_id:
             self.reload_chat_history(chat_id_str)
         
-        print(f"[UI] История чата {chat_id} обновлена через HTTP API, всего {len(self.chat_history_cache[chat_id_str])} сообщений в кэше")
+        print(f"[UI] История чата {chat_id} обновлена через HTTP API, всего {len(self.chat_history_cache.get(chat_id_str, []))} сообщений в кэше")
     
     def reload_chat_history(self, chat_id):
         """Перезагрузить историю чата из кэша памяти и обновить UI"""
@@ -734,6 +986,17 @@ class SimpleMaxApp(App):
             message_container.add_widget(reactions_label)
             # Увеличиваем высоту контейнера
             message_container.height = holder.height + reactions_label.height
+        else:
+            # Устанавливаем высоту контейнера равной высоте holder
+            message_container.height = holder.height
+        
+        # Динамическое обновление высоты контейнера при изменении высоты holder
+        def update_message_container_height(instance, value):
+            if reactions:
+                message_container.height = holder.height + reactions_label.height
+            else:
+                message_container.height = holder.height
+        holder.bind(height=update_message_container_height)
         
         self.messages_box.add_widget(message_container)
         # Прокрутка вниз
@@ -866,6 +1129,13 @@ class SimpleMaxApp(App):
                             if cmd == 3:
                                 error_msg = payload.get('message', 'Неизвестная ошибка') if payload else 'Нет деталей'
                                 print(f"[NETWORK] Ошибка от сервера (op={op}): {error_msg}")
+                                # Проверка на невалидный токен (любой opcode)
+                                if any(keyword in error_msg.lower() for keyword in ['token', 'invalid', 'expired', 'недействителен', 'устарел']):
+                                    self.token_invalid = True
+                                    print(f"[NETWORK] Токен недействителен (op={op}), требуется обновление через QR-код")
+                                    print(f"[NETWORK] Текст ошибки: {error_msg}")
+                                    # Запланировать отображение UI
+                                    Clock.schedule_once(lambda dt: self.show_token_error_ui(error_msg))
                                 # Не разрываем соединение, продолжаем обработку
                                 continue
 
@@ -904,6 +1174,78 @@ class SimpleMaxApp(App):
                                 for c in chats:
                                     cid = str(c.get("id") or c.get("chatId"))
                                     last_m = c.get("lastMessage", {})
+                                    
+                                    # Определение имени чата
+                                    title = c.get("title")
+                                    if title:
+                                        name = title
+                                    else:
+                                        # Попробовать получить участников
+                                        users = c.get("users", [])
+                                        if not users:
+                                            users = c.get("participants", [])
+                                        if users:
+                                            # Извлечь имена участников (кроме себя) и сохранить ID участников
+                                            names = []
+                                            participant_ids = []
+                                            for u in users:
+                                                if isinstance(u, dict):
+                                                    user_id = str(u.get("id") or u.get("userId") or "")
+                                                    user_name = u.get("name")
+                                                    # Сохранить ID участника
+                                                    if user_id:
+                                                        participant_ids.append(user_id)
+                                                        # Сохранить имя пользователя в словарь (если есть имя, иначе сохранить ID как имя)
+                                                        if user_name:
+                                                            self.user_names[user_id] = user_name
+                                                            print(f"[NETWORK] Сохранено имя пользователя: {user_id} -> {user_name}")
+                                                        else:
+                                                            # Сохранить ID как имя, чтобы отображался в контактах
+                                                            if user_id not in self.user_names:
+                                                                self.user_names[user_id] = user_id
+                                                                print(f"[NETWORK] Сохранён участник (без имени): {user_id}")
+                                                        if user_id != MY_ID and user_name:
+                                                            names.append(user_name)
+                                                else:
+                                                    # u может быть строкой или числом (ID участника)
+                                                    user_id = str(u)
+                                                    participant_ids.append(user_id)
+                                                    # Сохранить ID как имя
+                                                    if user_id not in self.user_names:
+                                                        self.user_names[user_id] = user_id
+                                                        print(f"[NETWORK] Сохранён участник (без имени): {user_id}")
+                                            # Сохранить список участников для этого чата
+                                            self.chat_participants[cid] = participant_ids
+                                            if names:
+                                                name = ", ".join(names)
+                                            else:
+                                                name = f"Чат {cid}"
+                                        else:
+                                            name = f"Чат {cid}"
+                                    
+                                    # Сохранить имя в chat_list и кэше
+                                    self.chat_list[cid] = name
+                                    # Сохранить в файловый кэш (только имя)
+                                    self.save_to_cache(cid, "", "left", name=name)
+                                    # Сохранить время последнего сообщения (если есть)
+                                    if last_m.get('time'):
+                                        self.chat_last_time[cid] = last_m['time'] / 1000  # мс -> секунды
+                                    elif cid in self.chat_last_time:
+                                        # оставить старое значение
+                                        pass
+                                    else:
+                                        self.chat_last_time[cid] = 0
+                                    # Определить, является ли чат групповым (количество участников > 2)
+                                    users = c.get("users", [])
+                                    if not users:
+                                        users = c.get("participants", [])
+                                    participants_count = len(users) if isinstance(users, list) else 0
+                                    print(f"[NETWORK] Чат {cid}: participants_count={participants_count}, users={users}")
+                                    self.chat_is_group[cid] = participants_count > 1
+                                    self.save_chat_group_flag(cid, participants_count > 1)
+                                    print(f"[NETWORK] Чат {cid} является групповым? {self.chat_is_group[cid]}")
+                                    
+                                    # Если есть последнее сообщение, сохранить его
                                     if last_m.get("text"):
                                         # Пытаемся получить ID отправителя из sender
                                         sender = last_m.get("sender")
@@ -916,12 +1258,15 @@ class SimpleMaxApp(App):
                                             # fallback на authorId (устаревшее)
                                             auth_id = str(last_m.get("authorId") or "")
                                         side = 'right' if auth_id == MY_ID else 'left'
-                                        title = c.get("title")
-                                        name = title if title else f"Чат {cid}"
                                         self.save_to_cache(cid, last_m["text"], side, name=name)
                                         print(f"[NETWORK] Сохранён чат {cid}: {name} (side={side}, auth_id={auth_id})")
+                                    else:
+                                        print(f"[NETWORK] Чат {cid}: {name} (без последнего сообщения)")
                                     # Запросить историю чата (первые 20 сообщений) - отключено для экономии запросов
                                     # asyncio.create_task(self.request_chat_history(ws, cid))
+
+                                # Сохранить имена пользователей в файловый кэш после обработки всех чатов
+                                self.save_user_names_to_cache()
 
                             if op == 128 and cmd == 0:
                                 # Новое сообщение
@@ -947,10 +1292,57 @@ class SimpleMaxApp(App):
                                     else:
                                         timestamp = time.time()
                                     print(f"[NETWORK] Новое сообщение в чате {cid}: {text[:30]}... (side={side}) auth_id={auth_id}, MY_ID={MY_ID}, sender={sender}, id={message_id}")
-                                    self.save_to_cache(cid, text, side, message_id=message_id)
+                                    # Подпись имени отправителя в групповых чатах
+                                    display_text = text
+                                    if side == 'left' and self.is_group_chat(cid):
+                                        print(f"[NETWORK] Новое сообщение в групповом чате {cid}, sender={sender}, auth_id={auth_id}")
+                                        sender_name = auth_id if auth_id else "Пользователь"
+                                        # Пытаемся получить имя из sender (если это dict с полем name)
+                                        if isinstance(sender, dict):
+                                            sender_name = sender.get('name', sender_name)
+                                            # Сохраняем имя в словарь user_names по auth_id, если оно не является fallback (auth_id или "Пользователь")
+                                            if auth_id and sender_name != str(auth_id) and sender_name != "Пользователь":
+                                                # Проверяем, изменилось ли имя
+                                                if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
+                                                    self.user_names[auth_id] = sender_name
+                                                    print(f"[NETWORK] Сохранено имя пользователя {auth_id} -> {sender_name}")
+                                                    # Сохраняем в файловый кэш
+                                                    self.save_user_names_to_cache()
+                                            print(f"[NETWORK] Имя отправителя из dict: {sender_name}")
+                                        elif isinstance(sender, str) and sender:
+                                            # sender может быть строкой (имя), используем как есть
+                                            sender_name = sender
+                                            print(f"[NETWORK] Имя отправителя из строки: {sender_name}")
+                                            # Сохраняем имя в словарь user_names, если оно не является fallback
+                                            if auth_id and sender_name != str(auth_id) and sender_name != "Пользователь":
+                                                if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
+                                                    self.user_names[auth_id] = sender_name
+                                                    print(f"[NETWORK] Сохранено имя пользователя {auth_id} -> {sender_name}")
+                                                    self.save_user_names_to_cache()
+                                        else:
+                                            # sender не dict и не строка, возможно, это ID (число) или отсутствует
+                                            # Ищем имя в словаре user_names по auth_id
+                                            if auth_id and auth_id in self.user_names:
+                                                sender_name = self.user_names[auth_id]
+                                                print(f"[NETWORK] Имя отправителя из словаря user_names: {sender_name}")
+                                            else:
+                                                # Имя неизвестно, используем auth_id или "Пользователь"
+                                                if auth_id:
+                                                    sender_name = auth_id
+                                                else:
+                                                    sender_name = "Пользователь"
+                                                print(f"[NETWORK] Имя отправителя неизвестно, используем '{sender_name}'")
+                                        display_text = f"{sender_name}: {text}"
+                                        print(f"[NETWORK] Итоговый текст: {display_text[:50]}")
+                                    else:
+                                        print(f"[NETWORK] Подпись не требуется: side={side}, chat_is_group={self.chat_is_group.get(cid, False)}")
+                                    # Сохраняем в кэш текст с подписью (если группой)
+                                    self.save_to_cache(cid, display_text, side, message_id=message_id)
+                                    # Обновить время последнего сообщения для сортировки
+                                    self.chat_last_time[cid] = timestamp
                                     # Если это текущий чат, показать в UI (только если приложение не в паузе)
                                     if self.current_chat_id == cid and not self.app_paused:
-                                        Clock.schedule_once(lambda dt: self.add_message_to_ui(text, side, timestamp=timestamp))
+                                        Clock.schedule_once(lambda dt: self.add_message_to_ui(display_text, side, timestamp=timestamp))
 
                             if op == 20 and cmd == 1:
                                 # Получена история чата
@@ -960,32 +1352,8 @@ class SimpleMaxApp(App):
                                 messages = payload.get("messages", [])
                                 cid = str(payload.get("chatId"))
                                 print(f"[NETWORK] Получена история чата {cid}: {len(messages)} сообщений")
-                                for idx, msg in enumerate(messages):
-                                    text = msg.get("text")
-                                    if text:
-                                        # Пытаемся получить ID отправителя из sender
-                                        sender = msg.get("sender")
-                                        auth_id = ""
-                                        if isinstance(sender, dict):
-                                            auth_id = str(sender.get("id") or sender.get("userId") or "")
-                                        elif isinstance(sender, (str, int)):
-                                            auth_id = str(sender)
-                                        else:
-                                            # fallback на authorId (устаревшее)
-                                            auth_id = str(msg.get("authorId") or "")
-                                        side = 'right' if auth_id == MY_ID else 'left'
-                                        message_id = msg.get("id")
-                                        timestamp = msg.get("time")
-                                        if timestamp:
-                                            timestamp = timestamp / 1000  # мс -> секунды
-                                        else:
-                                            timestamp = time.time()
-                                        if idx == 0:
-                                            print(f"[NETWORK] История: auth_id={auth_id}, MY_ID={MY_ID}, side={side}, sender={sender}, id={message_id}")
-                                        self.save_to_cache(cid, text, side, message_id=message_id)
-                                # Если это текущий чат, обновить UI (только если приложение не в паузе)
-                                if self.current_chat_id == cid and not self.app_paused:
-                                    Clock.schedule_once(lambda dt: self.reload_chat_history(cid))
+                                # Используем универсальный метод обработки сообщений
+                                self.process_messages_list(messages, cid)
 
                             if op == 7 and cmd == 1:
                                 # Ответ на запрос истории (возможно, содержит список сообщений)
@@ -995,32 +1363,8 @@ class SimpleMaxApp(App):
                                 messages = payload.get("messages", [])
                                 cid = str(payload.get("chatId"))
                                 print(f"[NETWORK] Получен ответ истории (opcode 7) для чата {cid}: {len(messages)} сообщений")
-                                for idx, msg in enumerate(messages):
-                                    text = msg.get("text")
-                                    if text:
-                                        # Пытаемся получить ID отправителя из sender
-                                        sender = msg.get("sender")
-                                        auth_id = ""
-                                        if isinstance(sender, dict):
-                                            auth_id = str(sender.get("id") or sender.get("userId") or "")
-                                        elif isinstance(sender, (str, int)):
-                                            auth_id = str(sender)
-                                        else:
-                                            # fallback на authorId (устаревшее)
-                                            auth_id = str(msg.get("authorId") or "")
-                                        side = 'right' if auth_id == MY_ID else 'left'
-                                        message_id = msg.get("id")
-                                        timestamp = msg.get("time")
-                                        if timestamp:
-                                            timestamp = timestamp / 1000  # мс -> секунды
-                                        else:
-                                            timestamp = time.time()
-                                        if idx == 0:
-                                            print(f"[NETWORK] История (opcode 7): auth_id={auth_id}, MY_ID={MY_ID}, side={side}, sender={sender}, id={message_id}")
-                                        self.save_to_cache(cid, text, side, message_id=message_id)
-                                # Если это текущий чат, обновить UI (только если приложение не в паузе)
-                                if self.current_chat_id == cid and not self.app_paused:
-                                    Clock.schedule_once(lambda dt: self.reload_chat_history(cid))
+                                # Используем универсальный метод обработки сообщений
+                                self.process_messages_list(messages, cid)
 
                             if op == 53 and cmd == 1:
                                 # Ответ синхронизации пропущенных событий
@@ -1051,61 +1395,16 @@ class SimpleMaxApp(App):
                                         print(f"[NETWORK] Реакции для сообщения {msg_id_str}: {reactions}")
 
                             if op == 49 and cmd == 1:
-                                # Список сообщений (возможно, новые сообщения или обновления)
-                                if payload is None:
-                                    print("[NETWORK] Ответ opcode 49 с пустым payload, пропускаем")
+                                # Список сообщений из WebSocket
+                                if not payload:
+                                    print("[NETWORK] Ответ opcode 49 с пустым payload")
                                     continue
-                                messages = payload.get("messages", [])
-                                print(f"[NETWORK] Получено сообщений (opcode 49): {len(messages)}")
-                                # Отладочная информация о chatId из payload
-                                payload_chat_id = payload.get("chatId")
-                                print(f"[DEBUG] payload chatId: {payload_chat_id}, current_chat_id: {self.current_chat_id}")
-                                need_reload = False
-                                # Сообщения приходят от новых к старым, переворачиваем для правильного порядка
-                                for msg in reversed(messages):
-                                    text = msg.get("text", "")
-                                    attaches = msg.get("attaches", [])
-                                    # Если текст пустой, но есть вложения, создаём описание
-                                    if not text and attaches:
-                                        attach_types = []
-                                        for attach in attaches:
-                                            attach_type = attach.get("type", "unknown")
-                                            attach_types.append(attach_type)
-                                        text = f"[вложение: {', '.join(attach_types)}]"
-                                    elif not text:
-                                        # Если нет ни текста, ни вложений, пропускаем
-                                        continue
-                                    
-                                    cid = str(msg.get("chatId") or payload.get("chatId") or "")
-                                    if not cid:
-                                        continue
-                                    print(f"[DEBUG] Обработка сообщения cid={cid}, current_chat_id={self.current_chat_id}, совпадение? {self.current_chat_id == cid}")
-                                    if self.current_chat_id == cid:
-                                        need_reload = True
-                                    sender = msg.get("sender")
-                                    auth_id = ""
-                                    if isinstance(sender, dict):
-                                        auth_id = str(sender.get("id") or sender.get("userId") or "")
-                                    elif isinstance(sender, (str, int)):
-                                        auth_id = str(sender)
-                                    else:
-                                        auth_id = str(msg.get("authorId") or "")
-                                    side = 'right' if auth_id == MY_ID else 'left'
-                                    message_id = msg.get("id")
-                                    # Сохраняем с ID
-                                    self.save_to_cache(cid, text, side, message_id=message_id)
-                                    print(f"[DEBUG] Сообщение сохранено в кэш для чата {cid}, message_id={message_id}")
-                                    # Если это текущий чат, показать в UI (только если приложение не в паузе)
-                                    if self.current_chat_id == cid and not self.app_paused:
-                                        print(f"[DEBUG] Добавляем сообщение в UI для текущего чата")
-                                        Clock.schedule_once(lambda dt: self.add_message_to_ui(text, side, timestamp=msg.get("time")/1000 if msg.get("time") else time.time()))
-                                    else:
-                                        print(f"[DEBUG] Сообщение не добавлено в UI (текущий чат {self.current_chat_id}, приложение в паузе? {self.app_paused})")
                                 
-                                # После обработки всех сообщений, если есть сообщения для текущего чата, перезагрузить историю
-                                if need_reload and not self.app_paused:
-                                    print(f"[DEBUG] Запланирована перезагрузка истории для текущего чата {self.current_chat_id}")
-                                    Clock.schedule_once(lambda dt: self.reload_chat_history(self.current_chat_id))
+                                messages = payload.get("messages", [])
+                                print(f"[NETWORK] Получено сообщений через WS (opcode 49): {len(messages)}")
+                                
+                                # Вызываем универсальный парсер
+                                self.process_messages_list(messages, str(payload.get("chatId") or self.current_chat_id))
 
                             # Ответы на служебные команды
                             if cmd == 0 and op != 1:
@@ -1253,6 +1552,159 @@ class SimpleMaxApp(App):
         # Также сохраняем в кэш памяти
         self.save_to_memory_cache(cid, text, side, message_id=message_id, reactions=reactions)
 
+    def save_chat_group_flag(self, cid, is_group):
+        """Сохранить флаг группового чата в файловый кэш"""
+        try:
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+        except:
+            cache = {"names": {}, "history": {}, "group_flags": {}}
+        if "group_flags" not in cache:
+            cache["group_flags"] = {}
+        cache["group_flags"][str(cid)] = bool(is_group)
+        try:
+            with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=4)
+            os.utime(CACHE_FILE, None)
+        except Exception as e:
+            print(f"Ошибка сохранения флага группового чата: {e}")
+
+    def process_messages_list(self, messages, cid):
+        """Универсальная обработка списка сообщений для UI и Кэша"""
+        cid = str(cid)
+        current_cid = str(self.current_chat_id)
+        print(f"[PROCESS] Обработка {len(messages)} сообщений для чата {cid}, текущий чат {current_cid}")
+        
+        # Сортируем сообщения по времени (старые -> новые)
+        def get_time(msg):
+            t = msg.get('time') or msg.get('timestamp') or 0
+            if t > 1_000_000_000_000:  # миллисекунды
+                t = t / 1000
+            return t
+        messages_sorted = sorted(messages, key=get_time)
+        
+        last_date = None
+        for msg in messages_sorted:
+            text = msg.get("text", "")
+            attaches = msg.get("attaches", [])
+            
+            if not text and attaches:
+                types = [a.get("type", "unknown") for a in attaches]
+                text = f"[вложение: {', '.join(types)}]"
+            elif not text:
+                continue
+
+            # Определяем сторону (право/лево)
+            sender = msg.get("sender")
+            auth_id = ""
+            if isinstance(sender, dict):
+                auth_id = str(sender.get("id") or sender.get("userId") or "")
+            elif isinstance(sender, (str, int)):
+                auth_id = str(sender)
+            else:
+                # Пробуем различные поля для идентификации отправителя
+                auth_id = str(msg.get("authorId") or msg.get("senderId") or "")
+            side = 'right' if auth_id == MY_ID else 'left'
+            
+            # Если чат ещё не известен или помечен как не групповой, но сообщение от другого пользователя,
+            # помечаем как групповой (fallback) - УБРАНО, используем is_group_chat
+            # if side == 'left' and not self.chat_is_group.get(cid, False):
+            #     self.chat_is_group[cid] = True
+            #     self.save_chat_group_flag(cid, True)
+            #     print(f"[PROCESS] Чат {cid} помечен как групповой (fallback)")
+            
+            # Подпись имени отправителя в групповых чатах
+            display_text = text
+            if side == 'left' and self.is_group_chat(cid):
+                print(f"[PROCESS] Чат {cid} является групповым, добавляем подпись. sender={sender}, auth_id={auth_id}")
+                sender_name = auth_id if auth_id else "Пользователь"
+                # Пытаемся получить имя из sender (если это dict с полем name)
+                if isinstance(sender, dict):
+                    sender_name = sender.get('name', sender_name)
+                    # Сохраняем имя в словарь user_names по auth_id, если оно не является fallback (auth_id или "Пользователь")
+                    if auth_id and sender_name != str(auth_id) and sender_name != "Пользователь":
+                        # Проверяем, изменилось ли имя
+                        if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
+                            self.user_names[auth_id] = sender_name
+                            print(f"[PROCESS] Сохранено имя пользователя {auth_id} -> {sender_name}")
+                            # Сохраняем в файловый кэш
+                            self.save_user_names_to_cache()
+                    print(f"[PROCESS] Имя отправителя из dict: {sender_name}")
+                elif isinstance(sender, str) and sender:
+                    # sender может быть строкой (имя), используем как есть
+                    sender_name = sender
+                    print(f"[PROCESS] Имя отправителя из строки: {sender_name}")
+                    # Сохраняем имя в словарь user_names, если оно не является fallback (auth_id или "Пользователь")
+                    if auth_id and sender_name != str(auth_id) and sender_name != "Пользователь":
+                        if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
+                            self.user_names[auth_id] = sender_name
+                            print(f"[PROCESS] Сохранено имя пользователя {auth_id} -> {sender_name}")
+                            self.save_user_names_to_cache()
+                else:
+                    # sender не dict и не строка, возможно, это ID (число) или отсутствует
+                    # Ищем имя в словаре user_names по auth_id
+                    if auth_id and auth_id in self.user_names:
+                        sender_name = self.user_names[auth_id]
+                        print(f"[PROCESS] Имя отправителя из словаря user_names: {sender_name}")
+                    else:
+                        # Имя неизвестно, используем auth_id или "Пользователь"
+                        if auth_id:
+                            sender_name = auth_id
+                        else:
+                            sender_name = "Пользователь"
+                        print(f"[PROCESS] Имя отправителя неизвестно, используем '{sender_name}'")
+                # Добавляем префикс
+                display_text = f"{sender_name}: {text}"
+                print(f"[PROCESS] Итоговый текст: {display_text[:50]}")
+            else:
+                print(f"[PROCESS] Подпись не требуется: side={side}, chat_is_group={self.chat_is_group.get(cid, False)}")
+            
+            # Сохраняем в кэш (текст с подписью для групповых чатов)
+            self.save_to_cache(cid, display_text, side, message_id=msg.get("id"))
+
+            # ОТРИСОВКА В UI (Исправленная лямбда)
+            if cid == current_cid and not self.app_paused:
+                msg_time = msg.get("time") or msg.get("timestamp")
+                if msg_time:
+                    # Если время в миллисекундах (больше 1e10), преобразуем в секунды
+                    if msg_time > 1_000_000_000_000:  # > 31 688 年, явно миллисекунды
+                        msg_time = msg_time / 1000
+                else:
+                    msg_time = time.time()
+                
+                # Определяем дату сообщения
+                from datetime import datetime
+                msg_date = datetime.fromtimestamp(msg_time).strftime('%Y-%m-%d')
+                if msg_date != last_date:
+                    # Добавить разделитель с датой
+                    Clock.schedule_once(lambda dt, d=msg_date: self.add_date_separator(d))
+                    last_date = msg_date
+                
+                # Фиксируем t=display_text и s=side в аргументах, чтобы они не менялись в цикле!
+                Clock.schedule_once(lambda dt, t=display_text, s=side, tm=msg_time:
+                                    self.add_message_to_ui(t, s, timestamp=tm))
+                print(f"[PROCESS] Запланировано добавление сообщения в UI: {display_text[:30]}...")
+            else:
+                print(f"[PROCESS] Сообщение не добавлено в UI (cid={cid}, current={current_cid}, paused={self.app_paused})")
+
+    def add_date_separator(self, date_str):
+        """Добавить разделитель с датой в UI"""
+        from kivy.uix.label import Label
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.metrics import dp
+        
+        # Контейнер для даты
+        date_container = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(24))
+        date_container.add_widget(Label(size_hint_x=0.2))
+        date_label = Label(text=date_str, size_hint_x=0.6, font_size=dp(12),
+                           color=(0.6, 0.6, 0.6, 1), halign='center', valign='middle')
+        date_label.bind(size=date_label.setter('text_size'))
+        date_container.add_widget(date_label)
+        date_container.add_widget(Label(size_hint_x=0.2))
+        
+        self.messages_box.add_widget(date_container)
+        print(f"[UI] Добавлен разделитель даты: {date_str}")
+
     async def check_history_request(self, ws):
         """Проверить и отправить запрос истории через Opcode 49 (новый метод) или Opcode 7"""
         if os.path.exists(HISTORY_REQUEST_FILE):
@@ -1261,6 +1713,18 @@ class SimpleMaxApp(App):
                     data = json.load(f)
                 chat_id = data.get("chatId")
                 request_type = data.get("type", "opcode7")  # по умолчанию opcode 7
+                
+                if request_type == "opcode19":
+                    # Запрос обновления списка чатов
+                    payload = {"token": TOKEN, "chatsCount": 40, "interactive": True}
+                    seq = self.next_seq()
+                    await ws.send(json.dumps({
+                        "ver": 11, "cmd": 0, "seq": seq,
+                        "opcode": 19, "payload": payload
+                    }))
+                    print(f"[NETWORK] Отправлен запрос обновления списка чатов (opcode 19), seq={seq}")
+                    os.remove(HISTORY_REQUEST_FILE)
+                    return
                 
                 if not chat_id:
                     os.remove(HISTORY_REQUEST_FILE)
@@ -1308,7 +1772,6 @@ class SimpleMaxApp(App):
                 os.remove(HISTORY_REQUEST_FILE)
             except Exception as e:
                 print(f"Ошибка обработки запроса истории: {e}")
-
     def update_reactions(self, message_id, reactions):
         """Обновить реакции для сообщения по его ID во всех чатах (в кэше памяти)"""
         updated = False
@@ -1348,6 +1811,142 @@ class SimpleMaxApp(App):
                     os.utime(CACHE_FILE, None)
                 except Exception as e:
                     print(f"Ошибка записи реакций в файловый кэш: {e}")
+
+    def show_token_error_ui(self, error_msg):
+        """Показать Popup с сообщением об ошибке токена и QR-кодом"""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.label import Label
+        from kivy.uix.image import Image
+        from kivy.core.image import Image as CoreImage
+        
+        content = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        content.add_widget(Label(text=f"Токен устарел: {error_msg}", halign='center'))
+        content.add_widget(Label(text="Отсканируйте QR-код для входа", halign='center'))
+        
+        # Генерация QR-кода (заглушка)
+        qr_data = f"https://max.ru/auth/qr?device={DEVICE_ID}&token={TOKEN[:10]}..."
+        qr_image_widget = None
+        if QRCODE_AVAILABLE:
+            try:
+                qr = qrcode.make(qr_data)
+                buf = io.BytesIO()
+                qr.save(buf, format='PNG')
+                buf.seek(0)
+                # Создание текстуры Kivy из данных PNG
+                img = CoreImage(buf, ext='png')
+                qr_image_widget = Image(texture=img.texture, size_hint=(1, 0.6))
+                content.add_widget(qr_image_widget)
+            except Exception as e:
+                print(f"[QR] Ошибка генерации QR-кода: {e}")
+                content.add_widget(Label(text=f"Ошибка генерации QR-кода: {e}"))
+        else:
+            content.add_widget(Label(text="QR-код недоступен (библиотека qrcode не установлена)"))
+        
+        # Кнопка "Проверить сканирование"
+        from kivy.uix.button import Button
+        check_btn = Button(text="Проверить сканирование", size_hint_y=0.15)
+        def on_check_scan(instance):
+            print("[UI] Проверка сканирования QR-кода")
+            # Запустить опрос для получения нового токена
+            Clock.schedule_once(lambda dt: self.refresh_token_via_qr(popup), 0.1)
+        check_btn.bind(on_press=on_check_scan)
+        content.add_widget(check_btn)
+        
+        # Кнопка "Обновить токен вручную"
+        manual_btn = Button(text="Обновить токен вручную", size_hint_y=0.15)
+        def on_manual_update(instance):
+            # TODO: реализовать ручное обновление токена
+            print("[UI] Запрос ручного обновления токена")
+            popup.dismiss()
+        manual_btn.bind(on_press=on_manual_update)
+        content.add_widget(manual_btn)
+        
+        popup = Popup(title="Ошибка авторизации", content=content, size_hint=(0.8, 0.8))
+        popup.open()
+
+    def save_user_names_to_cache(self):
+        """Сохранить словарь имён пользователей в файловый кэш"""
+        try:
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+        except:
+            cache = {"names": {}, "history": {}, "group_flags": {}, "user_names": {}}
+        if "user_names" not in cache:
+            cache["user_names"] = {}
+        cache["user_names"] = self.user_names
+        try:
+            with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=4)
+            os.utime(CACHE_FILE, None)
+            print(f"[CACHE] Сохранено {len(self.user_names)} имён пользователей")
+        except Exception as e:
+            print(f"[CACHE] Ошибка сохранения имён пользователей: {e}")
+
+    def is_group_chat(self, cid):
+        """Определить, является ли чат групповым по его ID и сохранённым флагам"""
+        cid_str = str(cid)
+        # Эвристика: ID группового чата начинается с '-' или содержит минус
+        if cid_str.startswith('-') or '-' in cid_str:
+            return True
+        # Если флаг уже известен, используем его
+        if cid_str in self.chat_is_group:
+            return self.chat_is_group[cid_str]
+        # ID личного чата состоит из цифр (длина 9? но не гарантировано)
+        # Если ID состоит только из цифр и длина <= 10, считаем личным
+        if cid_str.isdigit() and len(cid_str) <= 10:
+            return False
+        # По умолчанию считаем личным (без подписи)
+        return False
+
+    def refresh_token_via_qr(self, popup=None):
+        """Опрос сервера для получения нового токена после сканирования QR-кода (заглушка)"""
+        print("[TOKEN] Запуск опроса для получения нового токена")
+        # Имитация HTTP запроса к endpoint'у
+        # В реальности нужно отправить GET запрос к https://api.oneme.ru/auth/qr/status?device=...
+        # и получить новый токен
+        import threading
+        def poll():
+            time.sleep(2)  # имитация задержки
+            # Заглушка: генерируем фиктивный токен
+            new_token = "NEW_TOKEN_" + str(int(time.time()))
+            # Обновляем конфигурацию
+            Clock.schedule_once(lambda dt: self.update_token_and_reconnect(new_token, popup))
+        threading.Thread(target=poll, daemon=True).start()
+        if popup:
+            # Можно обновить UI, показать "Ожидание сканирования..."
+            pass
+
+    def update_token_and_reconnect(self, new_token, popup=None):
+        """Обновить токен в конфигурации и переподключиться"""
+        global TOKEN
+        TOKEN = new_token
+        # Сохранить в config.json
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except:
+            config = {}
+        config['token'] = new_token
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+            print(f"[TOKEN] Токен обновлён в {CONFIG_FILE}")
+        except Exception as e:
+            print(f"[TOKEN] Ошибка сохранения токена: {e}")
+        
+        # Сбросить флаг невалидности
+        self.token_invalid = False
+        # Закрыть popup если открыт
+        if popup:
+            popup.dismiss()
+        # Перезапустить сетевой поток
+        if self.network_thread and self.network_thread.is_alive():
+            # Остановить старый поток (через флаг)
+            pass
+        self.start_network_thread()
+        print("[TOKEN] Сетевой поток перезапущен с новым токеном")
+
 
 if __name__ == '__main__':
     SimpleMaxApp().run()
