@@ -8,6 +8,7 @@ import traceback
 import sys
 import requests
 import io
+import re
 try:
     import qrcode
     QRCODE_AVAILABLE = True
@@ -25,7 +26,7 @@ from kivy.uix.popup import Popup
 from kivy.clock import Clock
 from kivy.metrics import dp, sp
 from kivy.graphics import Color, RoundedRectangle
-from kivy.utils import platform
+from kivy.utils import platform, escape_markup
 from kivy.core.window import Window
 import ssl
 import websockets
@@ -54,7 +55,7 @@ if sys.platform == "win32":
 
 # Конфигурация (можно вынести в config.json)
 WS_URI = "wss://ws-api.oneme.ru/websocket"
-TOKEN = "An_Sx6HQ9HDijaNsT_MidUdzBLdmqndAjNC_CO3Bn81E9iz0OJv3tRVhFdxD-wrLlnSmUud-YaOrInZZxMgP5Dnt0e0VO-bunpN0xf6geMcFNrfqhZ2R8h9QBLJtlSYIE5Ufw_ziphzT-ixlZW4CvZoazvzzlXxDAT7RddrkAIo-bn956KU_ywODX2tbno9KCY5ZKu_x9TkNahptMVQifqQmMJcGXlYACEFqq2D7NOQ8bYJTTtjizYO2FhUwwrc5zvdSA0Mu9XQBykH2juQapm4z6bdGFyRRTdNVpbI21i9gCp9-5EoiC8-KjFOG3KzxsL50jaZ9Ix2nC3TTU3hFnntr-_MH39QJOdCN0I6fGjMdJees2W-LGyMCwQ8bniOAj3vN5_U-LQaCPEauU2eaOVB5WgGgbQ_otSyPz4BEM_MVf5diDMFkXqq0JIfFYaQQXtF8_3j9qyMvgLRBj6Twzsnxwvh5fePFYEjjW1tTPli_u8el9_t06C10E4QWWWlG18tvS-M-PF4r538fm0M8cdTGsAntYw1XmVRLmjH6bpIz7y8SEB0cWkcuK_EWgTkagv5JzBWsS1WWX89jTqxSSj8h4vAgAK2HvV-WPC-TPaZavk8mLruMruYFrPynFnf7AwWh7z96EMhzLNdCo6eSw0cdNFXoCEhsqQqOB4Kmu_NuNM1zMROtNBQsOiIHpxWpLTxSWjs"
+TOKEN = "An_Sx6HQ9HDijaNsT_MidUdzBLdmqndAjNC_CO3Bn81E9iz0OJv3tRVhFdxD-wrLlnSmUud-YaOrInZZxMgP5Dnt0e0VO-bunpN0xf6geMcFNrfqhZ2R8h9QBLJtlSYIE5Ufw_ziphzT-ixlZW4CvZoazvzzlXxDAT7RddrkAIo-bn956KU_ywODX2tbno9KCY5ZKu_x9TkNahptMVQifqQmMJcGXlYACEFqq2D7NOQ8bYJTTtjizYO2FhUwwrc5zvdSA0Mu9XQBykH2juQapm4z6bdGFyRRTdNVpbI21i9gCp9-5EoiC8-KjFOG3KzxsL50jaZ9Ix2nC3TTU3hFnntr-_MH39QJOdCN0I6fGjMdJees2W-LGyMCwQ8bniOAj3vN5_U-LQaCPEauU2eaOVB5WgGgbQ_otSyPz4BEM_MVf5diDMFkXqq0JIfFYaQQXtF8_3j9qyMvgLRBj6Twzsnxwvh5fePFYEjjW1tTPli_u8el9_t06C10E4QWWWlG18tvS-M-PF4r538fm0M8cdTGsAntYw1XmVRLmjH6bpIz7y8SEB0cWkcuK_EWgTkagv5JzBWsS1WWX89jTqxSSj8h4vAgAK2HvV-WPC-TPaZavk8mLruMruYFrPynFnf7AwWh7z96EMhzLNdCo6eSw0cdNFXoCEhsqQqOB4Kmu_NuNM1zMROtNBQsOiIHpxWpLTxSWja"
 DEVICE_ID = "04e30b88-9c09-40f2-9ebd-9540fd60a4cd"
 MY_ID = "62093986"
 
@@ -98,43 +99,143 @@ HTTP_API_PLATFORM = "https://platform-api.max.ru"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
 
 class SimpleMessageBubble(Widget):
-    """Упрощённый пузырь сообщения (без времени)"""
+    """Упрощённый пузырь сообщения (без времени) с возможностью выделения текста"""
     def __init__(self, text, side='left', timestamp=None, **kwargs):
         super().__init__(**kwargs)
         self.size_hint = (None, None)
         bg = (0.07, 0.45, 0.8, 1) if side == 'right' else (0.2, 0.2, 0.25, 1)
-        # Основной текст
-        self.lbl = Label(text=text, size_hint=(None, None), halign='left', valign='top',
-                         font_size=sp(14), color=(1,1,1,1), text_size=(dp(220), None))
-        self.lbl.bind(texture_size=self._update_size)
+        # Гибридный подход: Label для отображения текста, TextInput для выделения
+        from kivy.uix.label import Label
+        from kivy.uix.textinput import TextInput
+        
+        # Вычисляем размер текста через временный Label с обновлением текстуры
+        temp_label = Label(
+            text=text,
+            font_size=sp(14),
+            text_size=(dp(220), None),
+            halign='left',
+            valign='top',
+            markup=True
+        )
+        temp_label.texture_update()
+        text_size = temp_label.texture_size
+        if text_size[0] > 0 and text_size[1] > 0:
+            text_width = min(text_size[0], dp(220))
+            text_height = text_size[1]
+        else:
+            # fallback - эмпирические значения
+            text_width = dp(220)
+            text_height = dp(20)
+        
+        # Отладочная печать
+        print(f"[DEBUG] SimpleMessageBubble: text='{text[:30]}...', text_size={text_size}, text_width={text_width}, text_height={text_height}")
+        
+        # Учитываем внутренние отступы (padding left+right, top+bottom)
+        pad_h = dp(12) * 2  # горизонтальные padding слева и справа
+        pad_v = dp(8) * 2   # вертикальные padding сверху и снизу
+        total_width = text_width + pad_h
+        total_height = text_height + pad_v
+        
+        # Создаём Label для отображения текста (видимый)
+        self.label = Label(
+            text=text,
+            size_hint=(None, None),
+            halign='left',
+            valign='top',
+            font_size=sp(14),
+            color=(1, 1, 1, 1),
+            text_size=(text_width, None),
+            markup=True
+        )
+        self.label.width = text_width
+        self.label.height = text_height
+        self.label.texture_update()
+        
+        # Очищаем разметку для TextInput (чтобы при копировании не было тегов)
+        plain_text = re.sub(r'\[/?[^]]*\]', '', text)
+        # Если после удаления тегов остались лишние пробелы, убираем их
+        plain_text = plain_text.strip()
+        if not plain_text:
+            plain_text = text  # fallback (на случай, если весь текст состоял из тегов)
+        
+        # Создаём TextInput для выделения (невидимый текст, но видимое выделение)
+        self.text_input = TextInput(
+            text=plain_text,
+            size_hint=(None, None),
+            halign='left',
+            font_size=sp(14),
+            foreground_color=(0, 0, 0, 0),          # полностью прозрачный текст
+            disabled_foreground_color=(0, 0, 0, 0),
+            background_color=(0, 0, 0, 0),          # полностью прозрачный фон
+            background_normal='',
+            background_active='',
+            background_disabled_normal='',
+            border=(0, 0, 0, 0),
+            readonly=True,
+            multiline=True,
+            cursor_blink=False,
+            cursor_color=(0, 0, 0, 0),
+            padding=(dp(12), dp(8)),                # внутренние отступы
+            disabled=False,
+            selection_color=(0.3, 0.6, 1, 0.5),     # цвет выделения
+            focus=False,
+            use_handles=False,                      # отключить ручки выделения
+            use_bubble=True                         # оставить всплывающее меню копирования
+        )
+        self.text_input.text_size = (text_width, None)
+        self.text_input.width = total_width
+        self.text_input.height = total_height
+        
+        # Размер пузыря равен размеру TextInput (включая padding)
+        self.size = (total_width, total_height)
+        
         with self.canvas.before:
             Color(*bg)
             self.rect = RoundedRectangle(radius=[dp(12)])
         self.bind(pos=self._update_rect, size=self._update_rect)
-        self.add_widget(self.lbl)
-        # Внутренние отступы
+        # Добавляем сначала Label, затем TextInput (TextInput будет поверх для событий)
+        self.add_widget(self.label)
+        self.add_widget(self.text_input)
+        # Внутренние отступы (для расчёта размера пузыря)
         self.padding = [dp(12), dp(8)]  # горизонтальный, вертикальный
-
-    def _update_size(self, instance, size):
-        # Ограничиваем ширину текста
-        self.lbl.width = min(size[0], dp(220))
-        self.lbl.text_size = (self.lbl.width, None)
-        # Используем высоту текстуры текста
-        text_height = size[1]
-        self.lbl.height = text_height
-        # Учитываем внутренние отступы (padding)
-        pad_h = self.padding[0] * 2  # горизонтальные padding слева и справа
-        pad_v = self.padding[1] * 2  # вертикальные padding сверху и снизу
-        total_height = text_height + pad_v
-        total_width = self.lbl.width + pad_h
-        self.size = (total_width, total_height)
-        # Позиционируем текст с учётом padding
-        self.lbl.pos = (self.x + self.padding[0], self.y + self.padding[1])
 
     def _update_rect(self, *args):
         self.rect.pos, self.rect.size = self.pos, self.size
-        # Также обновляем позицию текста при изменении позиции пузыря
-        self.lbl.pos = (self.x + self.padding[0], self.y + self.padding[1])
+        # Позиционируем TextInput вместе с пузырём
+        self.text_input.pos = self.pos
+        self.text_input.size = self.size
+        # Позиционируем Label с учётом padding
+        from kivy.metrics import dp
+        pad_h = dp(12)
+        pad_v = dp(8)
+        self.label.pos = (self.pos[0] + pad_h, self.pos[1] + pad_v)
+        # Размер Label уже установлен в __init__, но можно обновить, если размер пузыря изменился
+        # (ширина текста не должна превышать ширину пузыря минус padding)
+        max_label_width = self.size[0] - 2 * pad_h
+        if self.label.width > max_label_width:
+            self.label.width = max_label_width
+            self.label.text_size = (max_label_width, None)
+        # Обновляем text_size у TextInput, чтобы выделение работало правильно
+        self.text_input.text_size = (max_label_width, None)
+        # Обновляем текстуру Label, чтобы текст отобразился
+        self.label.texture_update()
+
+    def on_touch_down(self, touch):
+        """Сбросить выделение TextInput при касании вне его области"""
+        # Проверяем, находится ли касание внутри TextInput
+        if self.text_input.collide_point(*touch.pos):
+            # Касание внутри TextInput, позволяем стандартную обработку
+            return super().on_touch_down(touch)
+        else:
+            # Касание вне TextInput, сбрасываем выделение
+            try:
+                if hasattr(self.text_input, 'cancel_selection'):
+                    self.text_input.cancel_selection()
+                # Снимаем фокус
+                self.text_input.focus = False
+            except Exception as e:
+                print(f"[DEBUG] Ошибка при сбросе выделения: {e}")
+            return super().on_touch_down(touch)
 
 class SimpleMaxApp(App):
     """Упрощённое приложение МАХ"""
@@ -165,6 +266,13 @@ class SimpleMaxApp(App):
         self.history_request_timestamps = {}  # время последнего запроса истории для каждого чата
         self.history_request_cooldown = 2  # минимальная задержка между запросами истории (секунды) - уменьшено для быстрого переключения на HTTP
         self.token_invalid = False  # флаг невалидности токена
+        self.in_chat_interface = False  # флаг, что активен интерфейс чата (а не меню)
+        # QR-авторизация
+        self.qr_track_id = None
+        self.qr_polling_interval = 5.0  # секунды
+        self.qr_popup = None  # ссылка на popup с QR-кодом
+        self.qr_auth_thread = None  # поток для асинхронной авторизации
+        self.qr_auth_cancel = False  # флаг отмены потока авторизации
 
     def next_seq(self):
         """Возвращает следующий порядковый номер для WebSocket-сообщений"""
@@ -186,7 +294,7 @@ class SimpleMaxApp(App):
 
     def on_request_close(self, *args):
         """При попытке закрытия сворачиваем приложение (только для Android)"""
-        from kivy.utils import platform
+        from kivy.utils import platform, escape_markup
         if platform == 'android':
             # Сворачиваем вместо закрытия
             from jnius import autoclass
@@ -202,21 +310,107 @@ class SimpleMaxApp(App):
         Window.softinput_mode = 'pan'  # сдвигает содержимое, чтобы поле ввода было видно
         
         # Основной макет
-        root = BoxLayout(orientation='vertical')
+        self.root_layout = BoxLayout(orientation='vertical')
 
-        # Верхняя панель с индикатором сети
+        # Верхняя панель с кнопкой Меню, заголовком, индикатором сети и кнопкой Connect
         top_panel = BoxLayout(size_hint_y=None, height=dp(40), padding=dp(5))
-        self.status_label = Label(text="OFFLINE", color=(1,0,0,1), bold=True, halign='left')
-        title_label = Label(text="MAX Simple", bold=True, size_hint_x=0.7)
+        self.menu_button = Button(text="Меню", size_hint_x=0.2)
+        self.menu_button.bind(on_press=self.go_to_main_menu)
+        title_label = Label(text="safe MAX", bold=True, size_hint_x=0.4)
+        self.status_label = Label(text="OFFLINE", color=(1,0,0,1), bold=True, halign='left', size_hint_x=0.2)
+        connect_btn = Button(text="Connect", size_hint_x=0.2)
+        connect_btn.bind(on_press=self.reconnect_network)
+        top_panel.add_widget(self.menu_button)
         top_panel.add_widget(title_label)
         top_panel.add_widget(self.status_label)
+        top_panel.add_widget(connect_btn)
 
+        # Контейнер для основного содержимого (меню или чат)
+        self.main_content = BoxLayout(orientation='vertical')
+        self.root_layout.add_widget(top_panel)
+        self.root_layout.add_widget(self.main_content)
+
+        # Показываем главное меню
+        self.show_main_menu()
+
+        # Запуск сетевого клиента
+        Clock.schedule_once(lambda dt: self.start_network_thread(), 1)
+        Clock.schedule_interval(self.update_network_status, 2)
+        # Загрузить чаты из кэша
+        Clock.schedule_once(lambda dt: self.load_chats_from_cache(), 0.5)
+
+        return self.root_layout
+
+    def go_to_main_menu(self, instance=None):
+        """Вернуться в главное меню (если не в нём уже)"""
+        if not self.in_chat_interface:
+            # Уже в главном меню, ничего не делаем
+            return
+        self.show_main_menu()
+
+    def show_main_menu(self):
+        """Показать главное меню с кнопками"""
+        # Сбрасываем флаг интерфейса чата
+        self.in_chat_interface = False
+        # Скрыть кнопку меню (в главном меню она не нужна)
+        if hasattr(self, 'menu_button'):
+            self.menu_button.opacity = 0.5
+            self.menu_button.disabled = True
+        # Очищаем контейнер
+        self.main_content.clear_widgets()
+        
+        # Создаём вертикальный макет для кнопок меню
+        menu_layout = BoxLayout(orientation='vertical', spacing=dp(20), padding=dp(40))
+        
+        # Кнопка "Чаты" (все чаты)
+        chats_btn = Button(text="Чаты", size_hint_y=None, height=dp(60))
+        chats_btn.bind(on_press=self.show_chat_list)
+        menu_layout.add_widget(chats_btn)
+        
+        # Кнопка "Группы" (только групповые чаты)
+        groups_btn = Button(text="Группы", size_hint_y=None, height=dp(60))
+        groups_btn.bind(on_press=self.show_groups_list)
+        menu_layout.add_widget(groups_btn)
+        
+        # Кнопка "Info" (информация)
+        info_btn = Button(text="Info", size_hint_y=None, height=dp(60))
+        info_btn.bind(on_press=self.show_info_popup)
+        menu_layout.add_widget(info_btn)
+        
+        # Кнопка "Выход"
+        exit_btn = Button(text="Выход", size_hint_y=None, height=dp(60))
+        exit_btn.bind(on_press=self.exit_app)
+        menu_layout.add_widget(exit_btn)
+        
+        self.main_content.add_widget(menu_layout)
+
+    def switch_to_chat_interface(self):
+        """Переключиться на интерфейс чата (панель чатов, сообщения, ввод)"""
+        # Если интерфейс чата уже активен, просто обновляем заголовок
+        if self.in_chat_interface:
+            if self.current_chat_id:
+                name = self.chat_list.get(self.current_chat_id, f"Чат {self.current_chat_id}")
+                self.chat_selector.text = name
+            return
+        
+        # Очищаем контейнер
+        self.main_content.clear_widgets()
+        
+        # Панель чатов (кнопки выбора групп и контактов)
+        chat_panel = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(5), padding=dp(5))
+        self.chat_selector = Button(text="Группы", size_hint_x=0.5)
+        self.chat_selector.bind(on_press=self.show_groups_list)
+        contacts_button = Button(text="Контакты", size_hint_x=0.5)
+        contacts_button.bind(on_press=self.show_contacts_list)
+        chat_panel.add_widget(self.chat_selector)
+        chat_panel.add_widget(contacts_button)
+        
         # Область сообщений
         messages_scroll = ScrollView(do_scroll_x=False)
         self.messages_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(10), padding=dp(10))
         self.messages_box.bind(minimum_height=self.messages_box.setter('height'))
         messages_scroll.add_widget(self.messages_box)
-
+        
         # Панель ввода
         input_panel = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(5), padding=dp(5))
         self.input_field = TextInput(hint_text="Введите сообщение...", multiline=False)
@@ -225,28 +419,50 @@ class SimpleMaxApp(App):
         send_button.bind(on_press=self.send_message)
         input_panel.add_widget(self.input_field)
         input_panel.add_widget(send_button)
+        
+        # Добавляем всё в main_content
+        self.main_content.add_widget(chat_panel)
+        self.main_content.add_widget(messages_scroll)
+        self.main_content.add_widget(input_panel)
+        
+        # Устанавливаем флаг
+        self.in_chat_interface = True
+        
+        # Показать кнопку меню (активна в интерфейсе чата)
+        if hasattr(self, 'menu_button'):
+            self.menu_button.opacity = 1
+            self.menu_button.disabled = False
+        
+        # Если есть выбранный чат, обновляем заголовок
+        if self.current_chat_id:
+            name = self.chat_list.get(self.current_chat_id, f"Чат {self.current_chat_id}")
+            self.chat_selector.text = name
 
-        # Список чатов (упрощённый - просто кнопка выбора)
-        chat_panel = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(5), padding=dp(5))
-        self.chat_selector = Button(text="Группы", size_hint_x=0.5)
-        self.chat_selector.bind(on_press=self.show_groups_list)
-        contacts_button = Button(text="Контакты", size_hint_x=0.5)
-        contacts_button.bind(on_press=self.show_contacts_list)
-        chat_panel.add_widget(self.chat_selector)
-        chat_panel.add_widget(contacts_button)
+    def show_info_popup(self, instance):
+        """Показать всплывающее окно с информацией"""
+        text = "По всем вопросам пишите в Телеграмм:\n[ref=https://t.me/AST_Jason][color=0000ff]t.me/AST_Jason[/color][/ref]"
+        content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(20))
+        # Используем Label с поддержкой разметки
+        from kivy.uix.label import Label
+        from kivy.core.text.markup import MarkupLabel
+        label = Label(text=text, markup=True, halign='center', valign='middle')
+        label.bind(on_ref_press=lambda instance, ref: self.open_url(ref))
+        content.add_widget(label)
+        close_btn = Button(text="Закрыть", size_hint_y=None, height=dp(40))
+        popup = Popup(title="Информация", content=content, size_hint=(0.8, 0.5))
+        close_btn.bind(on_press=popup.dismiss)
+        content.add_widget(close_btn)
+        popup.open()
 
-        root.add_widget(top_panel)
-        root.add_widget(chat_panel)
-        root.add_widget(messages_scroll)
-        root.add_widget(input_panel)
+    def open_url(self, url):
+        """Открыть URL (заглушка)"""
+        print(f"[INFO] Открыть URL: {url}")
+        # В реальном приложении можно использовать webbrowser или Intent на Android
+        # Пока просто логируем
 
-        # Запуск сетевого клиента
-        Clock.schedule_once(lambda dt: self.start_network_thread(), 1)
-        Clock.schedule_interval(self.update_network_status, 2)
-        # Загрузить чаты из кэша
-        Clock.schedule_once(lambda dt: self.load_chats_from_cache(), 0.5)
-
-        return root
+    def exit_app(self, instance):
+        """Выход из приложения (полное закрытие)"""
+        self.stop()
 
     def load_chats_from_cache(self):
         """Загрузить список чатов из кэша и историю в память (для обратной совместимости)"""
@@ -455,6 +671,8 @@ class SimpleMaxApp(App):
         """Переключиться на выбранный чат"""
         chat_id_str = str(chat_id)
         self.current_chat_id = chat_id_str
+        # Убедимся, что интерфейс чата активен
+        self.switch_to_chat_interface()
         name = self.chat_list.get(chat_id_str, f"Чат {chat_id}")
         self.chat_selector.text = name
         print(f"[UI] Выбран чат: {chat_id} ({name})")
@@ -529,29 +747,40 @@ class SimpleMaxApp(App):
         list_layout = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
         list_layout.bind(minimum_height=list_layout.setter('height'))
         
-        # Создать список контактов из user_names и личных чатов
-        contact_items = []
+        # Создать список контактов из user_names и личных чатов с временем последнего сообщения
+        contact_dict = {}  # user_id -> (name, timestamp)
         # 1. Пользователи из user_names
         for user_id, name in self.user_names.items():
             # Пропускаем пустые имена
             if not name or name == 'Пользователь':
                 continue
-            contact_items.append((user_id, name))
+            timestamp = self.chat_last_time.get(user_id, 0)
+            contact_dict[user_id] = (name, timestamp)
         # 2. Личные чаты (не групповые) из chat_list
         for cid, name in self.chat_list.items():
             if self.is_group_chat(cid):
                 continue
-            # Проверяем, что ID состоит из цифр (девятизначные)
             cid_str = str(cid)
             if not cid_str.isdigit():
                 continue
-            # Если уже есть в contact_items (по ID), не добавляем дубликат
-            if any(uid == cid_str for uid, _ in contact_items):
-                continue
-            contact_items.append((cid_str, name))
+            timestamp = self.chat_last_time.get(cid_str, 0)
+            # Если контакт уже есть в словаре, обновляем имя только если текущее имя хуже (пустое или "Пользователь")
+            if cid_str in contact_dict:
+                existing_name, existing_ts = contact_dict[cid_str]
+                # Предпочитаем имя из user_names (оно уже должно быть), но если имя из chat_list не "Чат X", можно обновить?
+                # Пока оставляем существующее имя
+                # Обновляем timestamp на максимальный
+                if timestamp > existing_ts:
+                    contact_dict[cid_str] = (existing_name, timestamp)
+            else:
+                contact_dict[cid_str] = (name, timestamp)
         
-        # Сортировка по имени
-        contact_items.sort(key=lambda x: x[1].lower())
+        # Преобразуем в список и сортируем по времени убыванию (сначала самые свежие)
+        contact_items = [(uid, name, ts) for uid, (name, ts) in contact_dict.items()]
+        contact_items.sort(key=lambda x: x[2], reverse=True)  # по timestamp убывание
+        
+        # Убираем timestamp для дальнейшей обработки
+        contact_items = [(uid, name) for uid, name, _ in contact_items]
         
         for user_id, name in contact_items:
             row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(2))
@@ -935,6 +1164,7 @@ class SimpleMaxApp(App):
 
     def add_message_to_ui(self, text, side, timestamp=None, reactions=None):
         """Добавить сообщение в UI"""
+        print(f"[UI] add_message_to_ui: text='{text[:50]}...', side={side}, timestamp={timestamp}")
         bubble = SimpleMessageBubble(text=text, side=side, timestamp=timestamp)
         # Создаём метку времени
         if timestamp is not None:
@@ -1293,7 +1523,7 @@ class SimpleMaxApp(App):
                                         timestamp = time.time()
                                     print(f"[NETWORK] Новое сообщение в чате {cid}: {text[:30]}... (side={side}) auth_id={auth_id}, MY_ID={MY_ID}, sender={sender}, id={message_id}")
                                     # Подпись имени отправителя в групповых чатах
-                                    display_text = text
+                                    display_text = escape_markup(text)
                                     if side == 'left' and self.is_group_chat(cid):
                                         print(f"[NETWORK] Новое сообщение в групповом чате {cid}, sender={sender}, auth_id={auth_id}")
                                         sender_name = auth_id if auth_id else "Пользователь"
@@ -1584,7 +1814,15 @@ class SimpleMaxApp(App):
         messages_sorted = sorted(messages, key=get_time)
         
         last_date = None
+        processed_ids = set()  # для дедупликации внутри одного вызова
         for msg in messages_sorted:
+            msg_id = msg.get("id")
+            if msg_id and msg_id in processed_ids:
+                print(f"[PROCESS] Пропуск дубликата сообщения с ID {msg_id}")
+                continue
+            if msg_id:
+                processed_ids.add(msg_id)
+            
             text = msg.get("text", "")
             attaches = msg.get("attaches", [])
             
@@ -1614,7 +1852,7 @@ class SimpleMaxApp(App):
             #     print(f"[PROCESS] Чат {cid} помечен как групповой (fallback)")
             
             # Подпись имени отправителя в групповых чатах
-            display_text = text
+            display_text = escape_markup(text)
             if side == 'left' and self.is_group_chat(cid):
                 print(f"[PROCESS] Чат {cid} является групповым, добавляем подпись. sender={sender}, auth_id={auth_id}")
                 sender_name = auth_id if auth_id else "Пользователь"
@@ -1653,9 +1891,13 @@ class SimpleMaxApp(App):
                         else:
                             sender_name = "Пользователь"
                         print(f"[PROCESS] Имя отправителя неизвестно, используем '{sender_name}'")
-                # Добавляем префикс
-                display_text = f"{sender_name}: {text}"
-                print(f"[PROCESS] Итоговый текст: {display_text[:50]}")
+                # Добавляем префикс с разметкой (жирный и фиолетовый)
+                # Экранируем специальные символы разметки в имени и тексте
+                escaped_sender = escape_markup(sender_name)
+                escaped_text = escape_markup(text)
+                # Фиолетовый цвет #DDA0DD (plum), жирный шрифт
+                display_text = f"[b][color=#DDA0DD]{escaped_sender}:[/color][/b] {escaped_text}"
+                print(f"[PROCESS] Итоговый текст с разметкой: {display_text[:70]}")
             else:
                 print(f"[PROCESS] Подпись не требуется: side={side}, chat_is_group={self.chat_is_group.get(cid, False)}")
             
@@ -1813,57 +2055,122 @@ class SimpleMaxApp(App):
                     print(f"Ошибка записи реакций в файловый кэш: {e}")
 
     def show_token_error_ui(self, error_msg):
-        """Показать Popup с сообщением об ошибке токена и QR-кодом"""
+        """Показать Popup с QR-кодом для авторизации"""
         from kivy.uix.popup import Popup
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.label import Label
         from kivy.uix.image import Image
         from kivy.core.image import Image as CoreImage
+        from kivy.uix.button import Button
+        from kivy.clock import Clock
         
-        content = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        content.add_widget(Label(text=f"Токен устарел: {error_msg}", halign='center'))
-        content.add_widget(Label(text="Отсканируйте QR-код для входа", halign='center'))
+        content = BoxLayout(orientation='vertical', padding=20, spacing=15)
         
-        # Генерация QR-кода (заглушка)
-        qr_data = f"https://max.ru/auth/qr?device={DEVICE_ID}&token={TOKEN[:10]}..."
+        # Заголовок
+        title_label = Label(text="Отсканируйте QR-код для входа",
+                           halign='center', font_size=sp(18), size_hint_y=0.1)
+        content.add_widget(title_label)
+        
+        # Placeholder для QR-кода (будет обновлён после запроса к серверу)
         qr_image_widget = None
         if QRCODE_AVAILABLE:
-            try:
-                qr = qrcode.make(qr_data)
-                buf = io.BytesIO()
-                qr.save(buf, format='PNG')
-                buf.seek(0)
-                # Создание текстуры Kivy из данных PNG
-                img = CoreImage(buf, ext='png')
-                qr_image_widget = Image(texture=img.texture, size_hint=(1, 0.6))
-                content.add_widget(qr_image_widget)
-            except Exception as e:
-                print(f"[QR] Ошибка генерации QR-кода: {e}")
-                content.add_widget(Label(text=f"Ошибка генерации QR-кода: {e}"))
+            # Создаём пустое белое изображение-заглушку
+            import io
+            from PIL import Image as PILImage
+            img = PILImage.new('RGB', (1, 1), color='white')
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            buf.seek(0)
+            img_texture = CoreImage(buf, ext='png').texture
+            # QR-код по ширине экрана, сохраняет пропорции
+            qr_image_widget = Image(texture=img_texture,
+                                    size_hint=(1, None),
+                                    height=300,  # временная высота, будет обновлена
+                                    keep_ratio=True,
+                                    allow_stretch=True)
+            content.add_widget(qr_image_widget)
+            # Надпись "Загрузка..."
+            loading_label = Label(text="Загрузка QR-кода...",
+                                 halign='center', color=(0.5,0.5,0.5,1),
+                                 size_hint_y=0.05)
+            content.add_widget(loading_label)
+            # Сохраняем ссылки для последующего обновления
+            self.qr_image_widget = qr_image_widget
+            self.qr_loading_label = loading_label
         else:
             content.add_widget(Label(text="QR-код недоступен (библиотека qrcode не установлена)"))
         
-        # Кнопка "Проверить сканирование"
-        from kivy.uix.button import Button
-        check_btn = Button(text="Проверить сканирование", size_hint_y=0.15)
-        def on_check_scan(instance):
-            print("[UI] Проверка сканирования QR-кода")
-            # Запустить опрос для получения нового токена
-            Clock.schedule_once(lambda dt: self.refresh_token_via_qr(popup), 0.1)
-        check_btn.bind(on_press=on_check_scan)
-        content.add_widget(check_btn)
+        # Обработчик касания для разворачивания QR-кода (будет работать после обновления)
+        def on_qr_touch(widget, touch):
+            if widget.collide_point(*touch.pos) and hasattr(self, 'current_qr_link') and self.current_qr_link:
+                # Создать увеличенный QR-код из текущей ссылки
+                try:
+                    import qrcode
+                    import io
+                    qr_full = qrcode.QRCode(
+                        version=None,
+                        error_correction=qrcode.constants.ERROR_CORRECT_L,
+                        box_size=30,
+                        border=6,
+                    )
+                    qr_full.add_data(self.current_qr_link)
+                    qr_full.make(fit=True)
+                    img_qr_full = qr_full.make_image(fill_color="black", back_color="white")
+                    buf_full = io.BytesIO()
+                    img_qr_full.save(buf_full, format='PNG')
+                    buf_full.seek(0)
+                    img_full = CoreImage(buf_full, ext='png')
+                    full_image = Image(texture=img_full.texture, size_hint=(0.95, 0.95))
+                    
+                    # Popup на весь экран
+                    full_content = BoxLayout(orientation='vertical', padding=20, spacing=10)
+                    full_content.add_widget(Label(text="Увеличенный QR-код", halign='center', font_size=sp(16)))
+                    full_content.add_widget(full_image)
+                    full_content.add_widget(Label(text="Касание за пределами QR-кода закроет окно", halign='center', font_size=sp(12)))
+                    
+                    full_popup = Popup(title="", content=full_content, size_hint=(0.95, 0.95), auto_dismiss=True)
+                    full_popup.open()
+                except Exception as e:
+                    print(f"[QR] Ошибка создания увеличенного QR-кода: {e}")
+                return True
+            return False
         
-        # Кнопка "Обновить токен вручную"
-        manual_btn = Button(text="Обновить токен вручную", size_hint_y=0.15)
-        def on_manual_update(instance):
-            # TODO: реализовать ручное обновление токена
-            print("[UI] Запрос ручного обновления токена")
+        if qr_image_widget:
+            qr_image_widget.bind(on_touch_down=on_qr_touch)
+        
+        # Кнопка "Обновить QR-код"
+        refresh_btn = Button(text="Обновить QR-код", size_hint_y=0.15)
+        def on_refresh(instance):
+            print("[UI] Запрос нового QR-кода")
+            # Закрыть текущий popup и запустить новый поток
             popup.dismiss()
-        manual_btn.bind(on_press=on_manual_update)
-        content.add_widget(manual_btn)
+            # Установить флаг отмены текущего потока
+            self.qr_auth_cancel = True
+            # Запустить новый поток авторизации
+            Clock.schedule_once(lambda dt: self.start_qr_auth_flow(None), 0.1)
+            # Показать новый popup через небольшую задержку
+            Clock.schedule_once(lambda dt: self.show_token_error_ui(error_msg), 0.2)
+        refresh_btn.bind(on_press=on_refresh)
+        content.add_widget(refresh_btn)
         
-        popup = Popup(title="Ошибка авторизации", content=content, size_hint=(0.8, 0.8))
+        popup = Popup(title="", content=content, size_hint=(0.9, 0.9))
+        
+        # Обработчик закрытия popup (отмена опроса)
+        def on_popup_dismiss(instance):
+            Clock.unschedule(self._poll_qr_status)
+            self.qr_popup = None
+            # Установить флаг отмены потока авторизации
+            self.qr_auth_cancel = True
+            # Попытаться остановить поток (неблокирующе)
+            if self.qr_auth_thread and self.qr_auth_thread.is_alive():
+                # Поток проверит флаг qr_auth_cancel и завершится
+                pass
+            print("[UI] Popup закрыт, опрос QR-кода отменён")
+        popup.bind(on_dismiss=on_popup_dismiss)
+        
         popup.open()
+        # Запустить поток QR-авторизации
+        Clock.schedule_once(lambda dt: self.start_qr_auth_flow(popup), 0.1)
 
     def save_user_names_to_cache(self):
         """Сохранить словарь имён пользователей в файловый кэш"""
@@ -1899,23 +2206,371 @@ class SimpleMaxApp(App):
         # По умолчанию считаем личным (без подписи)
         return False
 
-    def refresh_token_via_qr(self, popup=None):
-        """Опрос сервера для получения нового токена после сканирования QR-кода (заглушка)"""
-        print("[TOKEN] Запуск опроса для получения нового токена")
-        # Имитация HTTP запроса к endpoint'у
-        # В реальности нужно отправить GET запрос к https://api.oneme.ru/auth/qr/status?device=...
-        # и получить новый токен
-        import threading
-        def poll():
-            time.sleep(2)  # имитация задержки
-            # Заглушка: генерируем фиктивный токен
-            new_token = "NEW_TOKEN_" + str(int(time.time()))
-            # Обновляем конфигурацию
-            Clock.schedule_once(lambda dt: self.update_token_and_reconnect(new_token, popup))
-        threading.Thread(target=poll, daemon=True).start()
-        if popup:
-            # Можно обновить UI, показать "Ожидание сканирования..."
+    def reconnect_network(self, instance=None):
+        """Переподключиться к серверу (перезапустить сетевой поток)"""
+        print("[NETWORK] Ручное переподключение")
+        # Остановить старый поток, если он жив
+        if self.network_thread and self.network_thread.is_alive():
+            # Установить флаг остановки (если есть)
             pass
+        # Запустить новый поток
+        self.start_network_thread()
+
+    def refresh_token_via_qr(self, popup=None):
+        """Запуск QR-авторизации через WebSocket (совместимость)"""
+        print("[TOKEN] Запуск QR-авторизации через WebSocket")
+        # Просто запускаем основной поток авторизации
+        self.start_qr_auth_flow(popup)
+    
+    def _poll_qr_status(self, dt):
+        """Заглушка для опроса статуса QR-кода (реальный опрос происходит через WebSocket)"""
+        # Увеличиваем счётчик попыток
+        if not hasattr(self, 'qr_poll_attempts'):
+            self.qr_poll_attempts = 0
+        self.qr_poll_attempts += 1
+        
+        # Если это первая попытка, выведем сообщение и отменим дальнейшие вызовы
+        if self.qr_poll_attempts == 1:
+            print("[TOKEN] Опрос QR-кода через HTTP отключён, используется WebSocket протокол")
+            Clock.unschedule(self._poll_qr_status)
+        
+        # Ничего не делаем
+        return
+
+    async def qr_auth_flow(self, popup=None):
+        """Асинхронный поток для QR-авторизации по протоколу MAX (opcode 6, 288, 289)"""
+        print("[QR-AUTH] Запуск потока QR-авторизации")
+        # Сбросить флаг отмены
+        self.qr_auth_cancel = False
+        try:
+            # Установка соединения с сервером WebSocket
+            async with websockets.connect(
+                WS_URI,
+                ping_interval=30,
+                ping_timeout=15,
+                origin=ORIGIN,
+            ) as ws:
+                print("[QR-AUTH] WebSocket соединение установлено")
+                
+                # Шаг 1: Регистрация устройства (opcode 6)
+                # Используем структуру из рабочего скрипта 1.py
+                seq = self.next_seq()
+                reg_payload = {
+                    "ver": 11,
+                    "cmd": 0,
+                    "seq": seq,
+                    "opcode": 6,
+                    "payload": {
+                        "userAgent": {
+                            "deviceType": "WEB",
+                            "osVersion": "Windows",
+                            "deviceName": "Edge",
+                            "appVersion": "26.4.7",
+                            "locale": "ru"
+                        },
+                        "deviceId": DEVICE_ID
+                    }
+                }
+                await ws.send(json.dumps(reg_payload))
+                print(f"[QR-AUTH] Отправлен opcode 6 (регистрация устройства), seq={seq}")
+                
+                # Ждём ответ
+                try:
+                    response = await asyncio.wait_for(ws.recv(), timeout=10)
+                    data = json.loads(response)
+                    print(f"[QR-AUTH] Получен ответ на opcode 6: {data}")
+                    
+                    # Проверяем, успешен ли ответ
+                    if data.get("cmd") == 3:  # ошибка
+                        error_msg = data.get("payload", {}).get("localizedMessage", "Ошибка регистрации")
+                        print(f"[QR-AUTH] Ошибка регистрации устройства: {error_msg}")
+                        Clock.schedule_once(lambda dt: self.show_qr_error(f"Ошибка регистрации: {error_msg}", popup))
+                        return
+                    elif data.get("cmd") == 1:  # успех
+                        print("[QR-AUTH] Устройство зарегистрировано успешно")
+                    else:
+                        print(f"[QR-AUTH] Неизвестный ответ: {data}")
+                except asyncio.TimeoutError:
+                    print("[QR-AUTH] Таймаут ожидания ответа на opcode 6")
+                    Clock.schedule_once(lambda dt: self.show_qr_error("Таймаут регистрации устройства", popup))
+                    return
+                except websockets.exceptions.ConnectionClosed:
+                    print("[QR-AUTH] Соединение закрыто сервером после регистрации")
+                    Clock.schedule_once(lambda dt: self.show_qr_error("Сервер закрыл соединение", popup))
+                    return
+                
+                # Шаг 2: Запрос QR-кода (opcode 288)
+                seq = self.next_seq()
+                qr_req_payload = {
+                    "ver": 11,
+                    "cmd": 0,
+                    "seq": seq,
+                    "opcode": 288,
+                    "payload": {}  # пустой payload согласно логам
+                }
+                await ws.send(json.dumps(qr_req_payload))
+                print(f"[QR-AUTH] Отправлен opcode 288 (запрос QR-кода), seq={seq}")
+                
+                try:
+                    response = await asyncio.wait_for(ws.recv(), timeout=10)
+                    data = json.loads(response)
+                    print(f"[QR-AUTH] Получен ответ на opcode 288: {data}")
+                except asyncio.TimeoutError:
+                    print("[QR-AUTH] Таймаут ожидания ответа на opcode 288")
+                    Clock.schedule_once(lambda dt: self.show_qr_error("Таймаут запроса QR-кода", popup))
+                    return
+                except websockets.exceptions.ConnectionClosed:
+                    print("[QR-AUTH] Соединение закрыто сервером после запроса QR-кода")
+                    Clock.schedule_once(lambda dt: self.show_qr_error("Сервер закрыл соединение", popup))
+                    return
+                
+                if data.get("cmd") == 1:  # успешный ответ
+                    qr_link = data.get("payload", {}).get("qrLink")
+                    track_id = data.get("payload", {}).get("trackId")
+                    polling_interval = data.get("payload", {}).get("pollingInterval", 5000)
+                    
+                    if qr_link and track_id:
+                        print(f"[QR-AUTH] Получен qrLink: {qr_link}, trackId: {track_id}")
+                        # Сохраняем trackId для опроса
+                        self.qr_track_id = track_id
+                        self.qr_polling_interval = polling_interval / 1000.0  # в секунды
+                        
+                        # Обновляем UI: генерируем QR-код из qrLink и показываем
+                        Clock.schedule_once(lambda dt: self.update_qr_ui(qr_link, popup))
+                        
+                        # Шаг 3: Ожидание сканирования (opcode 289)
+                        # Будем опрашивать сервер каждые polling_interval секунд
+                        max_attempts = 60  # максимум 60 попыток (примерно 5 минут)
+                        attempt = 0
+                        while attempt < max_attempts and not self.qr_auth_cancel:
+                            await asyncio.sleep(self.qr_polling_interval)
+                            if self.qr_auth_cancel:
+                                print("[QR-AUTH] Поток авторизации отменён")
+                                break
+                            attempt += 1
+                            seq = self.next_seq()
+                            poll_payload = {
+                                "ver": 11,
+                                "cmd": 0,
+                                "seq": seq,
+                                "opcode": 289,
+                                "payload": {
+                                    "trackId": track_id
+                                }
+                            }
+                            await ws.send(json.dumps(poll_payload))
+                            print(f"[QR-AUTH] Отправлен opcode 289 (опрос статуса), seq={seq}, попытка {attempt}")
+                            
+                            try:
+                                response = await asyncio.wait_for(ws.recv(), timeout=10)
+                                poll_data = json.loads(response)
+                                print(f"[QR-AUTH] Получен ответ на opcode 289: {poll_data}")
+                            except asyncio.TimeoutError:
+                                print("[QR-AUTH] Таймаут ожидания ответа на opcode 289")
+                                continue
+                            
+                            status = poll_data.get("payload", {}).get("status", {})
+                            status_type = status.get("type", "")
+                            expires_at = status.get("expiresAt")
+                            token = poll_data.get("payload", {}).get("token")
+                            login_available = status.get("loginAvailable")
+                            
+                            if status_type == "scanned" and token:
+                                print(f"[QR-AUTH] QR-код отсканирован, получен токен: {token[:50]}...")
+                                Clock.schedule_once(lambda dt: self.update_token_and_reconnect(token, popup))
+                                break
+                            elif status_type == "expired":
+                                print("[QR-AUTH] QR-код истёк")
+                                Clock.schedule_once(lambda dt: self.show_qr_error("QR-код истёк, запросите новый", popup))
+                                break
+                            elif login_available:
+                                # Увеличиваем счётчик попыток получения токена после loginAvailable
+                                if not hasattr(self, 'qr_login_attempts'):
+                                    self.qr_login_attempts = 0
+                                self.qr_login_attempts += 1
+                                print(f"[QR-AUTH] QR-код отсканирован (loginAvailable=True), попытка {self.qr_login_attempts}/3")
+                                
+                                # Отправляем opcode 291 для получения токена через тот же WebSocket
+                                seq = self.next_seq()
+                                confirm_payload = {
+                                    "ver": 11,
+                                    "cmd": 0,
+                                    "seq": seq,
+                                    "opcode": 291,   # Команда на получение данных профиля и токена
+                                    "payload": {
+                                        "trackId": track_id  # тот же ID, что был у QR
+                                    }
+                                }
+                                await ws.send(json.dumps(confirm_payload))
+                                print(f"[QR-AUTH] Отправлен opcode 291, seq={seq}")
+                                
+                                try:
+                                    response = await asyncio.wait_for(ws.recv(), timeout=10)
+                                    confirm_data = json.loads(response)
+                                    print(f"[QR-AUTH] Получен ответ на opcode 291 (структура): {confirm_data}")
+                                    
+                                    if confirm_data.get("cmd") == 1:  # успех
+                                        # Извлекаем токен из нескольких возможных мест
+                                        token = None
+                                        # 1. payload.token (прямо в payload)
+                                        token = confirm_data.get("payload", {}).get("token")
+                                        # 2. payload.tokenAttrs.LOGIN.token
+                                        if not token:
+                                            token_attrs = confirm_data.get("payload", {}).get("tokenAttrs", {})
+                                            token = token_attrs.get("LOGIN", {}).get("token")
+                                        # 3. payload.access_token
+                                        if not token:
+                                            token = confirm_data.get("payload", {}).get("access_token")
+                                        
+                                        if token:
+                                            print(f"[QR-AUTH] Получен токен через opcode 291: {token[:50]}...")
+                                            Clock.schedule_once(lambda dt: self.update_token_and_reconnect(token, popup))
+                                            break
+                                        else:
+                                            print("[QR-AUTH] Токен не найден в ответе opcode 291 (проверь структуру)")
+                                            # Если превышен лимит попыток, показываем ошибку
+                                            if self.qr_login_attempts >= 3:
+                                                print("[QR-AUTH] Превышено количество попыток получения токена")
+                                                Clock.schedule_once(lambda dt: self.show_qr_error("Не удалось получить токен после сканирования", popup))
+                                                break
+                                            # Продолжаем опрос
+                                            continue
+                                    else:
+                                        print(f"[QR-AUTH] Ошибка ответа на opcode 291: {confirm_data}")
+                                        # Продолжаем опрос
+                                        continue
+                                except asyncio.TimeoutError:
+                                    print("[QR-AUTH] Таймаут ожидания ответа на opcode 291")
+                                    continue
+                                except websockets.exceptions.ConnectionClosed:
+                                    print("[QR-AUTH] Соединение закрыто сервером при запросе токена")
+                                    Clock.schedule_once(lambda dt: self.show_qr_error("Сервер закрыл соединение", popup))
+                                    break
+                            elif status_type == "pending" or expires_at:
+                                # QR-код ещё не отсканирован, продолжаем ждать
+                                print(f"[QR-AUTH] QR-код ожидает сканирования (истекает {expires_at})")
+                                # Можно обновить UI с оставшимся временем
+                                continue
+                            else:
+                                # Неизвестный статус, но возможно токен уже есть
+                                if token:
+                                    print(f"[QR-AUTH] Получен токен (неизвестный статус): {token[:50]}...")
+                                    Clock.schedule_once(lambda dt: self.update_token_and_reconnect(token, popup))
+                                    break
+                                else:
+                                    print("[QR-AUTH] Неизвестный статус, токен не найден")
+                                    # Продолжаем опрос
+                                    continue
+                        else:
+                            if attempt >= max_attempts:
+                                print("[QR-AUTH] Превышено количество попыток опроса")
+                                Clock.schedule_once(lambda dt: self.show_qr_error("Время ожидания истекло", popup))
+                            if self.qr_auth_cancel:
+                                print("[QR-AUTH] Опрос отменён пользователем")
+                    else:
+                        print("[QR-AUTH] В ответе отсутствуют qrLink или trackId")
+                        # Показать ошибку в UI
+                        Clock.schedule_once(lambda dt: self.show_qr_error("Не удалось получить QR-код", popup))
+                else:
+                    print(f"[QR-AUTH] Ошибка ответа на opcode 288: {data}")
+                    Clock.schedule_once(lambda dt: self.show_qr_error("Ошибка запроса QR-кода", popup))
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"[QR-AUTH] Соединение закрыто сервером: {e}")
+            Clock.schedule_once(lambda dt, err=e: self.show_qr_error(f"Сервер закрыл соединение: {err}", popup))
+        except Exception as e:
+            print(f"[QR-AUTH] Исключение в потоке QR-авторизации: {e}")
+            traceback.print_exc()
+            Clock.schedule_once(lambda dt, err=e: self.show_qr_error(f"Ошибка соединения: {err}", popup))
+
+    def start_qr_auth_flow(self, popup=None):
+        """Запустить асинхронный поток QR-авторизации в отдельном потоке"""
+        print("[QR-AUTH] Запуск потока авторизации")
+        # Сохраняем ссылку на popup
+        self.qr_popup = popup
+        # Создаём и запускаем поток
+        import threading
+        def run_flow():
+            # Создаём новый event loop для этого потока
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.qr_auth_flow(popup))
+            except Exception as e:
+                print(f"[QR-AUTH] Ошибка в потоке: {e}")
+            finally:
+                loop.close()
+        thread = threading.Thread(target=run_flow, daemon=True)
+        thread.start()
+        self.qr_auth_thread = thread
+
+    def update_qr_ui(self, qr_link, popup):
+        """Обновить UI popup с новым QR-кодом"""
+        print(f"[UI] update_qr_ui вызван с qr_link={qr_link}, popup={popup}")
+        if not popup or not popup.content:
+            print("[UI] popup или content отсутствует")
+            return
+        # Сохраняем ссылку для обработчика разворачивания
+        self.current_qr_link = qr_link
+        
+        # Найти виджет QR-кода в content (предполагаем, что это Image с size_hint (1, None))
+        # Ищем первый виджет Image в content
+        from kivy.uix.image import Image
+        from kivy.core.image import Image as CoreImage
+        from kivy.uix.label import Label
+        import io
+        import qrcode
+        
+        qr_image_widget = None
+        loading_label = None
+        for child in popup.content.children:
+            if isinstance(child, Image):
+                qr_image_widget = child
+            if isinstance(child, Label) and child.text == "Загрузка QR-кода...":
+                loading_label = child
+        
+        if qr_image_widget is None:
+            print("[UI] Не найден виджет QR-кода для обновления")
+            return
+        
+        # Генерируем QR-код из qr_link
+        try:
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=15,
+                border=4,
+            )
+            qr.add_data(qr_link)
+            qr.make(fit=True)
+            img_qr = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img_qr.save(buf, format='PNG')
+            buf.seek(0)
+            img = CoreImage(buf, ext='png')
+            qr_image_widget.texture = img.texture
+            # Устанавливаем квадратную высоту равной ширине
+            if qr_image_widget.width > 0:
+                qr_image_widget.height = qr_image_widget.width
+            # Гарантируем, что изображение сохраняет пропорции и растягивается
+            qr_image_widget.keep_ratio = True
+            qr_image_widget.allow_stretch = True
+            print(f"[UI] QR-код обновлён (ссылка: {qr_link})")
+            
+            # Удаляем надпись "Загрузка..."
+            if loading_label and loading_label in popup.content.children:
+                popup.content.remove_widget(loading_label)
+            
+            # Текстовое поле с данными QR-кода больше не используется
+        except Exception as e:
+            print(f"[UI] Ошибка генерации QR-кода: {e}")
+
+    def show_qr_error(self, error_msg, popup):
+        """Показать ошибку в popup"""
+        if popup and popup.content:
+            from kivy.uix.label import Label
+            # Добавить Label с ошибкой
+            popup.content.add_widget(Label(text=error_msg, color=(1,0,0,1)))
+        print(f"[UI] Ошибка QR: {error_msg}")
 
     def update_token_and_reconnect(self, new_token, popup=None):
         """Обновить токен в конфигурации и переподключиться"""
@@ -1937,12 +2592,17 @@ class SimpleMaxApp(App):
         
         # Сбросить флаг невалидности
         self.token_invalid = False
+        # Отменить опрос QR-кода
+        Clock.unschedule(self._poll_qr_status)
+        # Очистить ссылку на popup
+        self.qr_popup = None
         # Закрыть popup если открыт
         if popup:
             popup.dismiss()
         # Перезапустить сетевой поток
         if self.network_thread and self.network_thread.is_alive():
             # Остановить старый поток (через флаг)
+            # Пока просто запустим новый, старый завершится сам при разрыве соединения
             pass
         self.start_network_thread()
         print("[TOKEN] Сетевой поток перезапущен с новым токеном")
