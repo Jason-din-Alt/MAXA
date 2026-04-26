@@ -479,11 +479,6 @@ class SimpleMaxApp(App):
             for cid_str, is_group in group_flags.items():
                 self.chat_is_group[cid_str] = bool(is_group)
             
-            # Загружаем имена пользователей
-            user_names = cache.get('user_names', {})
-            self.user_names.update(user_names)
-            print(f"[CACHE] Загружено {len(user_names)} имён пользователей")
-            
             # Загружаем историю из файла в кэш памяти (для обратной совместимости)
             file_history = cache.get('history', {})
             for cid_str, messages in file_history.items():
@@ -688,7 +683,6 @@ class SimpleMaxApp(App):
                         added += 1
                 if added > 0:
                     print(f"[UI] Добавлено {added} участников в контакты")
-                    self.save_user_names_to_cache()
             else:
                 print(f"[UI] Участники чата {chat_id_str} неизвестны")
         # Очистить текущие сообщения
@@ -847,7 +841,6 @@ class SimpleMaxApp(App):
             if new_name:
                 self.user_names[str(user_id)] = new_name
                 # Сохранить в кэш
-                self.save_user_names_to_cache()
                 print(f"[UI] Контакт {user_id} переименован в '{new_name}'")
                 popup.dismiss()
                 # Обновить список контактов
@@ -898,7 +891,6 @@ class SimpleMaxApp(App):
                 pass
             self.user_names[user_id] = name
             # Сохранить в кэш
-            self.save_user_names_to_cache()
             print(f"[UI] Добавлен контакт: {user_id} -> {name}")
             popup.dismiss()
             # Обновить список контактов
@@ -1259,6 +1251,28 @@ class SimpleMaxApp(App):
         except Exception as e:
             print(f"[NETWORK] Ошибка запроса истории: {e}")
 
+    async def request_contact_info(self, ws, user_ids):
+        """Запросить информацию о контактах (opcode 32)
+        
+        Args:
+            ws: WebSocket соединение
+            user_ids: список строковых ID пользователей
+        """
+        if not user_ids:
+            return
+        try:
+            seq = self.next_seq()
+            payload = {
+                "contacts": [{"id": int(uid)} for uid in user_ids if uid.isdigit()]
+            }
+            await ws.send(json.dumps({
+                "ver": 11, "cmd": 0, "seq": seq, "opcode": 32,
+                "payload": payload
+            }))
+            print(f"[NETWORK] Запрошена информация о контактах: {user_ids}, seq={seq}")
+        except Exception as e:
+            print(f"[NETWORK] Ошибка запроса информации о контактах: {e}")
+
     async def periodic_updates(self, ws):
         """Периодическое обновление чатов и истории"""
         import time
@@ -1496,7 +1510,26 @@ class SimpleMaxApp(App):
                                     # asyncio.create_task(self.request_chat_history(ws, cid))
 
                                 # Сохранить имена пользователей в файловый кэш после обработки всех чатов
-                                self.save_user_names_to_cache()
+
+                            if op == 32 and cmd == 1:
+                                # Ответ на запрос информации о контактах
+                                contacts = payload.get("contacts", [])
+                                print(f"[NETWORK] Получено контактов через opcode 32: {len(contacts)}")
+                                for c in contacts:
+                                    uid = str(c.get("id"))
+                                    if not uid:
+                                        continue
+                                    # Берем первое имя из списка names
+                                    names = c.get("names", [])
+                                    name = uid  # fallback
+                                    if names and isinstance(names, list) and len(names) > 0:
+                                        name = names[0].get("name", uid)
+                                    # Сохраняем в словарь user_names
+                                    if uid not in self.user_names or self.user_names[uid] != name:
+                                        self.user_names[uid] = name
+                                        print(f"[NETWORK] Сохранено имя пользователя {uid} -> {name}")
+                                    # Также сохраняем в кэш контактов (если нужно)
+                                    # self.save_user_names_to_cache() - отложим до конца обработки
 
                             if op == 128 and cmd == 0:
                                 # Новое сообщение
@@ -1536,8 +1569,6 @@ class SimpleMaxApp(App):
                                                 if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
                                                     self.user_names[auth_id] = sender_name
                                                     print(f"[NETWORK] Сохранено имя пользователя {auth_id} -> {sender_name}")
-                                                    # Сохраняем в файловый кэш
-                                                    self.save_user_names_to_cache()
                                             print(f"[NETWORK] Имя отправителя из dict: {sender_name}")
                                         elif isinstance(sender, str) and sender:
                                             # sender может быть строкой (имя), используем как есть
@@ -1548,7 +1579,6 @@ class SimpleMaxApp(App):
                                                 if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
                                                     self.user_names[auth_id] = sender_name
                                                     print(f"[NETWORK] Сохранено имя пользователя {auth_id} -> {sender_name}")
-                                                    self.save_user_names_to_cache()
                                         else:
                                             # sender не dict и не строка, возможно, это ID (число) или отсутствует
                                             # Ищем имя в словаре user_names по auth_id
@@ -1865,8 +1895,6 @@ class SimpleMaxApp(App):
                         if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
                             self.user_names[auth_id] = sender_name
                             print(f"[PROCESS] Сохранено имя пользователя {auth_id} -> {sender_name}")
-                            # Сохраняем в файловый кэш
-                            self.save_user_names_to_cache()
                     print(f"[PROCESS] Имя отправителя из dict: {sender_name}")
                 elif isinstance(sender, str) and sender:
                     # sender может быть строкой (имя), используем как есть
@@ -1877,7 +1905,6 @@ class SimpleMaxApp(App):
                         if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
                             self.user_names[auth_id] = sender_name
                             print(f"[PROCESS] Сохранено имя пользователя {auth_id} -> {sender_name}")
-                            self.save_user_names_to_cache()
                 else:
                     # sender не dict и не строка, возможно, это ID (число) или отсутствует
                     # Ищем имя в словаре user_names по auth_id
@@ -2171,24 +2198,6 @@ class SimpleMaxApp(App):
         popup.open()
         # Запустить поток QR-авторизации
         Clock.schedule_once(lambda dt: self.start_qr_auth_flow(popup), 0.1)
-
-    def save_user_names_to_cache(self):
-        """Сохранить словарь имён пользователей в файловый кэш"""
-        try:
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                cache = json.load(f)
-        except:
-            cache = {"names": {}, "history": {}, "group_flags": {}, "user_names": {}}
-        if "user_names" not in cache:
-            cache["user_names"] = {}
-        cache["user_names"] = self.user_names
-        try:
-            with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False, indent=4)
-            os.utime(CACHE_FILE, None)
-            print(f"[CACHE] Сохранено {len(self.user_names)} имён пользователей")
-        except Exception as e:
-            print(f"[CACHE] Ошибка сохранения имён пользователей: {e}")
 
     def is_group_chat(self, cid):
         """Определить, является ли чат групповым по его ID и сохранённым флагам"""
