@@ -1283,14 +1283,16 @@ class SimpleMaxApp(App):
             return
         try:
             seq = self.next_seq()
+            # Сервер ожидает поле "contactIds" со списком чисел, а не "contacts" со списком словарей
+            contact_ids = [int(uid) for uid in user_ids if uid.isdigit()]
             payload = {
-                "contacts": [{"id": int(uid)} for uid in user_ids if uid.isdigit()]
+                "contactIds": contact_ids
             }
             await ws.send(json.dumps({
                 "ver": 11, "cmd": 0, "seq": seq, "opcode": 32,
                 "payload": payload
             }))
-            print(f"[NETWORK] Запрошена информация о контактах: {user_ids}, seq={seq}")
+            print(f"[NETWORK] Запрошена информация о контактах: {user_ids}, seq={seq}, contactIds={contact_ids}")
         except Exception as e:
             print(f"[NETWORK] Ошибка запроса информации о контактах: {e}")
 
@@ -1556,18 +1558,29 @@ class SimpleMaxApp(App):
                                     # Безопасно достаем имя
                                     names = c.get("names", [])
                                     name = uid  # fallback
-                                    if names and isinstance(names, list) and len(names) > 0:
-                                        # Отладочный вывод структуры names
-                                        print(f"[NETWORK] names для {uid}: {names}")
-                                        # Берем первый элемент списка
-                                        first_name = names[0]
-                                        if isinstance(first_name, dict):
-                                            name = first_name.get("name", uid)
-                                            # Если нет ключа 'name', попробуем 'firstName'
+                                    if names:
+                                        if isinstance(names, list) and len(names) > 0:
+                                            # Отладочный вывод структуры names
+                                            print(f"[NETWORK] names для {uid}: {names}")
+                                            # Берем первый элемент списка
+                                            first_name = names[0]
+                                            if isinstance(first_name, dict):
+                                                name = first_name.get("name", uid)
+                                                # Если нет ключа 'name', попробуем 'firstName'
+                                                if name == uid:
+                                                    name = first_name.get("firstName", uid)
+                                            else:
+                                                name = str(first_name)
+                                        elif isinstance(names, dict):
+                                            # names может быть словарём с ключами name/firstName
+                                            print(f"[NETWORK] names для {uid} является словарём: {names}")
+                                            name = names.get("name", uid)
                                             if name == uid:
-                                                name = first_name.get("firstName", uid)
+                                                name = names.get("firstName", uid)
                                         else:
-                                            name = str(first_name)
+                                            # Неизвестный тип, используем fallback
+                                            name = c.get("firstName", uid)
+                                            print(f"[NETWORK] У контакта {uid} неизвестный тип names: {type(names)}")
                                     else:
                                         # Попробуем поле firstName напрямую из контакта
                                         name = c.get("firstName", uid)
