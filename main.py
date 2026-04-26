@@ -1510,6 +1510,18 @@ class SimpleMaxApp(App):
                                     # asyncio.create_task(self.request_chat_history(ws, cid))
 
                                 # Сохранить имена пользователей в файловый кэш после обработки всех чатов
+                                
+                                # Собрать ID пользователей, у которых имя равно ID (неизвестные)
+                                unknown_user_ids = []
+                                for uid, uname in self.user_names.items():
+                                    if uid == uname:  # имя равно ID, значит имя неизвестно
+                                        unknown_user_ids.append(uid)
+                                # Отправить запрос информации о контактах, если есть неизвестные
+                                if unknown_user_ids:
+                                    # Ограничим количество ID, чтобы не перегружать запрос
+                                    batch = unknown_user_ids[:50]  # максимум 50 за раз
+                                    asyncio.create_task(self.request_contact_info(ws, batch))
+                                    print(f"[NETWORK] Запрошена информация о {len(batch)} неизвестных контактах: {batch}")
 
                             if op == 32 and cmd == 1:
                                 # Ответ на запрос информации о контактах
@@ -1523,11 +1535,22 @@ class SimpleMaxApp(App):
                                     names = c.get("names", [])
                                     name = uid  # fallback
                                     if names and isinstance(names, list) and len(names) > 0:
-                                        name = names[0].get("name", uid)
+                                        # Отладочный вывод структуры names
+                                        print(f"[NETWORK] names для {uid}: {names}")
+                                        # Извлекаем имя из первого элемента списка
+                                        first_name = names[0]
+                                        if isinstance(first_name, dict):
+                                            name = first_name.get("name", uid)
+                                        else:
+                                            name = str(first_name)
+                                    else:
+                                        print(f"[NETWORK] У контакта {uid} нет поля names или пустой список")
                                     # Сохраняем в словарь user_names
                                     if uid not in self.user_names or self.user_names[uid] != name:
                                         self.user_names[uid] = name
                                         print(f"[NETWORK] Сохранено имя пользователя {uid} -> {name}")
+                                        # Запланировать обновление UI
+                                        Clock.schedule_once(lambda dt, uid=uid, name=name: self.update_contact_ui(uid, name))
                                     # Также сохраняем в кэш контактов (если нужно)
                                     # self.save_user_names_to_cache() - отложим до конца обработки
 
@@ -2580,6 +2603,18 @@ class SimpleMaxApp(App):
             # Добавить Label с ошибкой
             popup.content.add_widget(Label(text=error_msg, color=(1,0,0,1)))
         print(f"[UI] Ошибка QR: {error_msg}")
+
+    def update_contact_ui(self, user_id, name):
+        """Обновить интерфейс контактов и групп после получения имени пользователя"""
+        # Обновить список контактов, если он открыт
+        if hasattr(self, 'contacts_list_widget') and self.contacts_list_widget:
+            # Здесь можно обновить конкретный элемент списка контактов
+            # Пока просто перезагрузим список контактов
+            Clock.schedule_once(lambda dt: self.show_contacts_list(None))
+        # Обновить список групп, если открыт
+        if hasattr(self, 'groups_list_widget') and self.groups_list_widget:
+            Clock.schedule_once(lambda dt: self.show_groups_list(None))
+        print(f"[UI] Обновлён UI для пользователя {user_id} -> {name}")
 
     def update_token_and_reconnect(self, new_token, popup=None):
         """Обновить токен в конфигурации и переподключиться"""
