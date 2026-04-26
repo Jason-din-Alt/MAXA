@@ -1451,6 +1451,9 @@ class SimpleMaxApp(App):
                                         users = c.get("users", [])
                                         if not users:
                                             users = c.get("participants", [])
+                                        # Если users является словарём (ID -> объект), преобразуем в список значений
+                                        if isinstance(users, dict):
+                                            users = list(users.values())
                                         if users:
                                             # Извлечь имена участников (кроме себя) и сохранить ID участников
                                             names = []
