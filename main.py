@@ -254,6 +254,8 @@ class SimpleMaxApp(App):
         self.chat_is_group = {}  # id -> bool (групповой чат?)
         self.chat_participants = {}  # id -> list of user_ids (участники чата)
         self.user_names = {}  # user_id -> name (для подписи в групповых чатах)
+        # Загрузить имена пользователей из файла
+        self.load_user_names_from_file()
         self.app_paused = False
         self.reconnect_attempt = 0
         self.seq_counter = 0
@@ -1133,7 +1135,8 @@ class SimpleMaxApp(App):
                 json.dump(pending_data, f)
             print(f"[UI] Создан pending файл: {PENDING_FILE}, chatId={self.current_chat_id}, text={text[:20]}...")
             # Локально добавляем сообщение
-            self.add_message_to_ui(text, 'right', timestamp=time.time())
+            is_group = self.is_group_chat(self.current_chat_id)
+            self.add_message_to_ui(text, 'right', timestamp=time.time(), sender_name=None, is_group=is_group)
             self.input_field.text = ""
         except Exception as e:
             print(f"Ошибка отправки: {e}")
@@ -1154,9 +1157,9 @@ class SimpleMaxApp(App):
         except Exception as e:
             print(f"Ошибка создания запроса истории: {e}")
 
-    def add_message_to_ui(self, text, side, timestamp=None, reactions=None):
+    def add_message_to_ui(self, text, side, timestamp=None, reactions=None, sender_name=None, is_group=False):
         """Добавить сообщение в UI"""
-        print(f"[UI] add_message_to_ui: text='{text[:50]}...', side={side}, timestamp={timestamp}")
+        print(f"[UI] add_message_to_ui: text='{text[:50]}...', side={side}, timestamp={timestamp}, sender_name={sender_name}, is_group={is_group}")
         bubble = SimpleMessageBubble(text=text, side=side, timestamp=timestamp)
         # Создаём метку времени
         if timestamp is not None:
@@ -1195,6 +1198,19 @@ class SimpleMaxApp(App):
         
         # Контейнер для всего сообщения (вертикальный)
         message_container = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        
+        # Добавляем имя отправителя для групповых чатов (только для сообщений слева)
+        if is_group and side == 'left' and sender_name:
+            sender_label = Label(text=sender_name, size_hint_y=None, font_size=sp(12),
+                                 color=(0.8, 0.2, 0.8, 1), halign='left', bold=True)
+            sender_label.bind(size=sender_label.setter('text_size'))
+            sender_label.height = dp(16)
+            message_container.add_widget(sender_label)
+            # Увеличиваем высоту контейнера
+            message_container.height = holder.height + sender_label.height
+        else:
+            message_container.height = holder.height
+        
         message_container.add_widget(holder)
         
         # Добавляем реакции, если есть
@@ -1207,17 +1223,22 @@ class SimpleMaxApp(App):
             reactions_label.height = dp(16)
             message_container.add_widget(reactions_label)
             # Увеличиваем высоту контейнера
-            message_container.height = holder.height + reactions_label.height
+            message_container.height = holder.height + (dp(16) if is_group and side == 'left' and sender_name else 0) + reactions_label.height
         else:
-            # Устанавливаем высоту контейнера равной высоте holder
-            message_container.height = holder.height
+            # Устанавливаем высоту контейнера равной высоте holder + имя отправителя
+            if is_group and side == 'left' and sender_name:
+                message_container.height = holder.height + dp(16)
+            else:
+                message_container.height = holder.height
         
         # Динамическое обновление высоты контейнера при изменении высоты holder
         def update_message_container_height(instance, value):
+            total_height = holder.height
+            if is_group and side == 'left' and sender_name:
+                total_height += dp(16)
             if reactions:
-                message_container.height = holder.height + reactions_label.height
-            else:
-                message_container.height = holder.height
+                total_height += dp(16)
+            message_container.height = total_height
         holder.bind(height=update_message_container_height)
         
         self.messages_box.add_widget(message_container)
@@ -1527,32 +1548,41 @@ class SimpleMaxApp(App):
                                 # Ответ на запрос информации о контактах
                                 contacts = payload.get("contacts", [])
                                 print(f"[NETWORK] Получено контактов через opcode 32: {len(contacts)}")
+                                updated_count = 0
                                 for c in contacts:
                                     uid = str(c.get("id"))
                                     if not uid:
                                         continue
-                                    # Берем первое имя из списка names
+                                    # Безопасно достаем имя
                                     names = c.get("names", [])
                                     name = uid  # fallback
                                     if names and isinstance(names, list) and len(names) > 0:
                                         # Отладочный вывод структуры names
                                         print(f"[NETWORK] names для {uid}: {names}")
-                                        # Извлекаем имя из первого элемента списка
+                                        # Берем первый элемент списка
                                         first_name = names[0]
                                         if isinstance(first_name, dict):
                                             name = first_name.get("name", uid)
+                                            # Если нет ключа 'name', попробуем 'firstName'
+                                            if name == uid:
+                                                name = first_name.get("firstName", uid)
                                         else:
                                             name = str(first_name)
                                     else:
-                                        print(f"[NETWORK] У контакта {uid} нет поля names или пустой список")
+                                        # Попробуем поле firstName напрямую из контакта
+                                        name = c.get("firstName", uid)
+                                        print(f"[NETWORK] У контакта {uid} нет поля names, используем firstName: {name}")
                                     # Сохраняем в словарь user_names
                                     if uid not in self.user_names or self.user_names[uid] != name:
                                         self.user_names[uid] = name
+                                        updated_count += 1
                                         print(f"[NETWORK] Сохранено имя пользователя {uid} -> {name}")
                                         # Запланировать обновление UI
                                         Clock.schedule_once(lambda dt, uid=uid, name=name: self.update_contact_ui(uid, name))
-                                    # Также сохраняем в кэш контактов (если нужно)
-                                    # self.save_user_names_to_cache() - отложим до конца обработки
+                                # Сохраняем обновленные имена в файл
+                                if updated_count > 0:
+                                    self.save_user_names_to_file()
+                                    print(f"[NETWORK] Сохранено {updated_count} имён в файл")
 
                             if op == 128 and cmd == 0:
                                 # Новое сообщение
@@ -1578,9 +1608,12 @@ class SimpleMaxApp(App):
                                     else:
                                         timestamp = time.time()
                                     print(f"[NETWORK] Новое сообщение в чате {cid}: {text[:30]}... (side={side}) auth_id={auth_id}, MY_ID={MY_ID}, sender={sender}, id={message_id}")
-                                    # Подпись имени отправителя в групповых чатах
+                                    # Определяем, является ли чат групповым
+                                    is_group = self.is_group_chat(cid)
+                                    sender_name = None
+                                    name_updated = False
                                     display_text = escape_markup(text)
-                                    if side == 'left' and self.is_group_chat(cid):
+                                    if side == 'left' and is_group:
                                         print(f"[NETWORK] Новое сообщение в групповом чате {cid}, sender={sender}, auth_id={auth_id}")
                                         sender_name = auth_id if auth_id else "Пользователь"
                                         # Пытаемся получить имя из sender (если это dict с полем name)
@@ -1591,6 +1624,7 @@ class SimpleMaxApp(App):
                                                 # Проверяем, изменилось ли имя
                                                 if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
                                                     self.user_names[auth_id] = sender_name
+                                                    name_updated = True
                                                     print(f"[NETWORK] Сохранено имя пользователя {auth_id} -> {sender_name}")
                                             print(f"[NETWORK] Имя отправителя из dict: {sender_name}")
                                         elif isinstance(sender, str) and sender:
@@ -1601,6 +1635,7 @@ class SimpleMaxApp(App):
                                             if auth_id and sender_name != str(auth_id) and sender_name != "Пользователь":
                                                 if auth_id not in self.user_names or self.user_names[auth_id] != sender_name:
                                                     self.user_names[auth_id] = sender_name
+                                                    name_updated = True
                                                     print(f"[NETWORK] Сохранено имя пользователя {auth_id} -> {sender_name}")
                                         else:
                                             # sender не dict и не строка, возможно, это ID (число) или отсутствует
@@ -1615,17 +1650,22 @@ class SimpleMaxApp(App):
                                                 else:
                                                     sender_name = "Пользователь"
                                                 print(f"[NETWORK] Имя отправителя неизвестно, используем '{sender_name}'")
-                                        display_text = f"{sender_name}: {text}"
-                                        print(f"[NETWORK] Итоговый текст: {display_text[:50]}")
+                                        # display_text уже содержит escape_markup(text), оставляем без имени
+                                        # имя будет отображено отдельным Label
+                                        print(f"[NETWORK] Текст без имени (имя будет отдельным Label): {display_text[:50]}")
                                     else:
-                                        print(f"[NETWORK] Подпись не требуется: side={side}, chat_is_group={self.chat_is_group.get(cid, False)}")
+                                        print(f"[NETWORK] Подпись не требуется: side={side}, chat_is_group={is_group}")
                                     # Сохраняем в кэш текст с подписью (если группой)
                                     self.save_to_cache(cid, display_text, side, message_id=message_id)
+                                    # Сохраняем обновленные имена в файл, если есть изменения
+                                    if name_updated:
+                                        self.save_user_names_to_file()
+                                        print(f"[NETWORK] Сохранены обновленные имена в файл")
                                     # Обновить время последнего сообщения для сортировки
                                     self.chat_last_time[cid] = timestamp
                                     # Если это текущий чат, показать в UI (только если приложение не в паузе)
                                     if self.current_chat_id == cid and not self.app_paused:
-                                        Clock.schedule_once(lambda dt: self.add_message_to_ui(display_text, side, timestamp=timestamp))
+                                        Clock.schedule_once(lambda dt: self.add_message_to_ui(display_text, side, timestamp=timestamp, sender_name=sender_name, is_group=is_group))
 
                             if op == 20 and cmd == 1:
                                 # Получена история чата
@@ -1905,9 +1945,13 @@ class SimpleMaxApp(App):
             #     print(f"[PROCESS] Чат {cid} помечен как групповой (fallback)")
             
             # Подпись имени отправителя в групповых чатах
+            # Инициализируем переменные по умолчанию
+            sender_name = None
+            is_group = False
             display_text = escape_markup(text)
             if side == 'left' and self.is_group_chat(cid):
                 print(f"[PROCESS] Чат {cid} является групповым, добавляем подпись. sender={sender}, auth_id={auth_id}")
+                is_group = True
                 sender_name = auth_id if auth_id else "Пользователь"
                 # Пытаемся получить имя из sender (если это dict с полем name)
                 if isinstance(sender, dict):
@@ -1941,17 +1985,17 @@ class SimpleMaxApp(App):
                         else:
                             sender_name = "Пользователь"
                         print(f"[PROCESS] Имя отправителя неизвестно, используем '{sender_name}'")
-                # Добавляем префикс с разметкой (жирный и фиолетовый)
-                # Экранируем специальные символы разметки в имени и тексте
-                escaped_sender = escape_markup(sender_name)
+                # Для групповых чатов используем отдельный Label для имени, текст оставляем без имени
                 escaped_text = escape_markup(text)
-                # Фиолетовый цвет #DDA0DD (plum), жирный шрифт
-                display_text = f"[b][color=#DDA0DD]{escaped_sender}:[/color][/b] {escaped_text}"
-                print(f"[PROCESS] Итоговый текст с разметкой: {display_text[:70]}")
+                display_text = escaped_text
+                print(f"[PROCESS] Текст без имени (имя будет отдельным Label): {display_text[:70]}")
             else:
+                # Не групповой чат или сообщение справа: имя не нужно
+                sender_name = None
+                is_group = False
                 print(f"[PROCESS] Подпись не требуется: side={side}, chat_is_group={self.chat_is_group.get(cid, False)}")
             
-            # Сохраняем в кэш (текст с подписью для групповых чатов)
+            # Сохраняем в кэш (текст без имени)
             self.save_to_cache(cid, display_text, side, message_id=msg.get("id"))
 
             # ОТРИСОВКА В UI (Исправленная лямбда)
@@ -1972,10 +2016,10 @@ class SimpleMaxApp(App):
                     Clock.schedule_once(lambda dt, d=msg_date: self.add_date_separator(d))
                     last_date = msg_date
                 
-                # Фиксируем t=display_text и s=side в аргументах, чтобы они не менялись в цикле!
-                Clock.schedule_once(lambda dt, t=display_text, s=side, tm=msg_time:
-                                    self.add_message_to_ui(t, s, timestamp=tm))
-                print(f"[PROCESS] Запланировано добавление сообщения в UI: {display_text[:30]}...")
+                # Фиксируем t=display_text, s=side, sn=sender_name, ig=is_group в аргументах, чтобы они не менялись в цикле!
+                Clock.schedule_once(lambda dt, t=display_text, s=side, sn=sender_name, ig=is_group, tm=msg_time:
+                                    self.add_message_to_ui(t, s, timestamp=tm, sender_name=sn, is_group=ig))
+                print(f"[PROCESS] Запланировано добавление сообщения в UI: {display_text[:30]}... (sender_name={sender_name}, is_group={is_group})")
             else:
                 print(f"[PROCESS] Сообщение не добавлено в UI (cid={cid}, current={current_cid}, paused={self.app_paused})")
 
@@ -2603,6 +2647,29 @@ class SimpleMaxApp(App):
             # Добавить Label с ошибкой
             popup.content.add_widget(Label(text=error_msg, color=(1,0,0,1)))
         print(f"[UI] Ошибка QR: {error_msg}")
+
+    def save_user_names_to_file(self):
+        """Сохранить словарь user_names в файл для persistence"""
+        try:
+            import json
+            with open("users.json", "w", encoding="utf-8") as f:
+                json.dump(self.user_names, f, ensure_ascii=False, indent=2)
+            print(f"[CACHE] Сохранено {len(self.user_names)} имён пользователей в users.json")
+        except Exception as e:
+            print(f"[CACHE] Ошибка сохранения имён пользователей: {e}")
+
+    def load_user_names_from_file(self):
+        """Загрузить словарь user_names из файла"""
+        try:
+            import json
+            if os.path.exists("users.json"):
+                with open("users.json", "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.user_names.update(data)
+                        print(f"[CACHE] Загружено {len(data)} имён пользователей из users.json")
+        except Exception as e:
+            print(f"[CACHE] Ошибка загрузки имён пользователей: {e}")
 
     def update_contact_ui(self, user_id, name):
         """Обновить интерфейс контактов и групп после получения имени пользователя"""
